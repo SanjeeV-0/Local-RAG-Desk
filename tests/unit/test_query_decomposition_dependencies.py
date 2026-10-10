@@ -22,6 +22,11 @@ def test_query_decomposition_provider_uses_openrouter_settings() -> None:
         openrouter_decomposition_top_p=0.8,
         openrouter_decomposition_response_format={"type": "json_object"},
         openrouter_decomposition_reasoning_effort="low",
+        openrouter_decomposition_top_k=7,
+        openrouter_decomposition_frequency_penalty=0.3,
+        openrouter_decomposition_presence_penalty=-0.3,
+        openrouter_timeout_seconds=12.5,
+        openrouter_max_retries=3,
         openrouter_base_url="https://example.test/v1",
         openrouter_app_name="Test App",
     )
@@ -41,6 +46,11 @@ def test_query_decomposition_provider_uses_openrouter_settings() -> None:
     assert provider.top_p == 0.8
     assert provider.response_format == {"type": "json_object"}
     assert provider.reasoning_effort == "low"
+    assert provider.top_k == 7
+    assert provider.frequency_penalty == 0.3
+    assert provider.presence_penalty == -0.3
+    assert provider.client.timeout == 12.5
+    assert provider.client.max_retries == 3
     assert str(provider.client.base_url) == "https://example.test/v1/"
 
     get_query_decomposition_provider.cache_clear()
@@ -59,10 +69,17 @@ def test_generation_provider_uses_generation_settings_not_decomposition_settings
         openrouter_generation_top_p=0.95,
         openrouter_generation_response_format={"type": "text"},
         openrouter_generation_reasoning_effort="high",
+        openrouter_generation_top_k=42,
+        openrouter_generation_frequency_penalty=0.6,
+        openrouter_generation_presence_penalty=-0.6,
+        openrouter_timeout_seconds=20.0,
+        openrouter_max_retries=1,
         # Deliberately different decomposition values, to prove they never
         # leak into the generation provider.
         openrouter_decomposition_model="test-decomposition-model",
         openrouter_decomposition_temperature=0.0,
+        openrouter_decomposition_top_k=7,
+        openrouter_decomposition_frequency_penalty=0.1,
         openrouter_base_url="https://example.test/v1",
         openrouter_app_name="Test App",
     )
@@ -82,7 +99,17 @@ def test_generation_provider_uses_generation_settings_not_decomposition_settings
     assert provider.top_p == 0.95
     assert provider.response_format == {"type": "text"}
     assert provider.reasoning_effort == "high"
+    assert provider.top_k == 42
+    assert provider.frequency_penalty == 0.6
+    assert provider.presence_penalty == -0.6
+    assert provider.client.timeout == 20.0
+    assert provider.client.max_retries == 1
     assert str(provider.client.base_url) == "https://example.test/v1/"
+
+    # Decomposition's distinct top_k/frequency_penalty values never leaked
+    # into this generation provider instance.
+    assert provider.top_k != 7
+    assert provider.frequency_penalty != 0.1
 
     get_generation_provider.cache_clear()
 

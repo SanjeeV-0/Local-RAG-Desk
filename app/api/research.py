@@ -79,6 +79,7 @@ async def ask(
             generation_service=generation_service,
             trace_requested=trace_requested,
             effective_trace=effective_trace,
+            result_limit=settings.research_ask_result_limit,
         )
 
     with langfuse.start_as_current_observation(
@@ -96,6 +97,7 @@ async def ask(
                 generation_service=generation_service,
                 trace_requested=trace_requested,
                 effective_trace=effective_trace,
+                result_limit=settings.research_ask_result_limit,
             )
 
             observation.update(
@@ -122,12 +124,19 @@ async def _execute_research(
     generation_service: GenerationService,
     trace_requested: bool = False,
     effective_trace: bool = False,
+    result_limit: int = 10,
 ) -> dict[str, object]:
-    """Execute retrieval, context assembly, and generation."""
+    """Execute retrieval, context assembly, and generation.
+
+    `result_limit` defaults to the previously hard-coded literal (10), so
+    any direct call that omits it (e.g. existing tests) preserves today's
+    exact behavior -- the production route always passes
+    `Settings.research_ask_result_limit` explicitly.
+    """
 
     results = await retrieval_service.search(
         query=query,
-        limit=10,
+        limit=result_limit,
         trace=effective_trace,
     )
 

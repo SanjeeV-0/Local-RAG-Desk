@@ -69,14 +69,22 @@ def get_query_decomposition_provider() -> OpenRouterQueryDecompositionProvider:
         reasoning_effort=settings.openrouter_decomposition_reasoning_effort,
         base_url=settings.openrouter_base_url,
         app_name=settings.openrouter_app_name,
+        top_k=settings.openrouter_decomposition_top_k,
+        frequency_penalty=settings.openrouter_decomposition_frequency_penalty,
+        presence_penalty=settings.openrouter_decomposition_presence_penalty,
+        timeout=settings.openrouter_timeout_seconds,
+        max_retries=settings.openrouter_max_retries,
     )
 
 
 def get_query_decomposer() -> QueryDecomposer:
     """Return the application query decomposer."""
 
+    settings = get_settings()
+
     return QueryDecomposer(
         provider=get_query_decomposition_provider(),
+        max_sub_queries=settings.query_decomposition_max_sub_queries,
     )
 
 
@@ -134,11 +142,20 @@ async def get_retrieval_service(
     / `reranker=None` at the constructor level (used by unit tests).
     """
 
+    settings = get_settings()
+
     return RetrievalService(
-        repository=DocumentRepository(session),
+        repository=DocumentRepository(
+            session,
+            hnsw_ef_search=settings.hnsw_ef_search,
+            hnsw_iterative_scan=settings.hnsw_iterative_scan,
+            hnsw_max_scan_tuples=settings.hnsw_max_scan_tuples,
+            hnsw_scan_mem_multiplier=settings.hnsw_scan_mem_multiplier,
+        ),
         embedding_provider=embedding_provider,
         reranker=reranker,
         query_decomposer=query_decomposer,
+        candidate_limit_floor=settings.retrieval_candidate_limit_floor,
     )
 
 
@@ -161,6 +178,11 @@ def get_generation_provider() -> OpenRouterGenerationProvider:
         reasoning_effort=settings.openrouter_generation_reasoning_effort,
         base_url=settings.openrouter_base_url,
         app_name=settings.openrouter_app_name,
+        top_k=settings.openrouter_generation_top_k,
+        frequency_penalty=settings.openrouter_generation_frequency_penalty,
+        presence_penalty=settings.openrouter_generation_presence_penalty,
+        timeout=settings.openrouter_timeout_seconds,
+        max_retries=settings.openrouter_max_retries,
     )
 
 

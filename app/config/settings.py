@@ -18,8 +18,39 @@ not a per-role choice.
 """
 
 from functools import lru_cache
+from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _validate_positive_top_k(value: int | None, field_name: str) -> int | None:
+    """Shared validator body for both tasks' `*_top_k` fields -- kept as a
+    plain module function (rather than duplicated per-field logic) since
+    the rule is identical: a configured `top_k` must be a positive integer,
+    `None` (unconfigured) is always valid."""
+
+    if value is None:
+        return value
+
+    if value < 1:
+        raise ValueError(f"{field_name} must be a positive integer.")
+
+    return value
+
+
+def _validate_penalty_range(value: float | None) -> float | None:
+    """Shared validator body for both tasks' frequency/presence penalty
+    fields -- OpenAI's documented valid range is -2.0 to 2.0 inclusive;
+    `None` (unconfigured) is always valid."""
+
+    if value is None:
+        return value
+
+    if not (-2.0 <= value <= 2.0):
+        raise ValueError("Penalty values must be between -2.0 and 2.0.")
+
+    return value
 
 
 class Settings(BaseSettings):
@@ -38,6 +69,85 @@ class Settings(BaseSettings):
     # different models are not comparable.
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    # pgvector HNSW query-time search breadth (`hnsw.ef_search`). `None`
+    # (the default) means "don't touch it" -- vector search runs with
+    # whatever `hnsw.ef_search` the Postgres server itself defaults to
+    # (pgvector's own built-in default is 40), preserving today's behavior
+    # exactly for anyone who doesn't set this. When set, it is applied via
+    # a per-transaction `SET LOCAL` immediately before each vector search
+    # query (see `DocumentRepository.search_similar_chunks`) -- never a
+    # bare session-level `SET`, since this application's connections are
+    # pooled and reused across unrelated requests; `SET LOCAL` is
+    # guaranteed by PostgreSQL to revert at the end of the transaction
+    # (commit or rollback), so it can never leak into another request that
+    # later reuses the same pooled physical connection. Valid range per
+    # pgvector: 1-1000.
+    hnsw_ef_search: int | None = None
+
+    @field_validator("hnsw_ef_search")
+    @classmethod
+    def _validate_hnsw_ef_search(cls, value: int | None) -> int | None:
+        if value is None:
+            return value
+
+        if not (1 <= value <= 1000):
+            raise ValueError("hnsw_ef_search must be between 1 and 1000 (pgvector's valid range).")
+
+        return value
+
+    # pgvector's iterative index scan mode -- lets a search that would
+    # otherwise return fewer than `limit` rows (because post-filtering, e.g.
+    # this application's `document_id`/`section_id`/`max_distance` WHERE
+    # clauses, discards HNSW candidates) keep scanning instead of returning
+    # a short result. `None` (the default) means "don't touch it" -- pgvector
+    # 0.8.6 (the version installed against this project's configured
+    # database, confirmed via `SELECT extversion FROM pg_extension WHERE
+    # extname='vector'`) itself defaults `hnsw.iterative_scan` to `"off"`.
+    # Applied the same way as `hnsw_ef_search`: a validated `SET LOCAL`
+    # inside the same transaction as the vector search query, which
+    # PostgreSQL guarantees reverts at that transaction's end (commit or
+    # rollback), so it can never leak across a pooled connection's reuse by
+    # a later, unrelated request.
+    hnsw_iterative_scan: Literal["off", "relaxed_order", "strict_order"] | None = None
+
+    # Row cap for one iterative scan pass (only meaningful when
+    # `hnsw_iterative_scan` is not "off"). `None` (the default) leaves
+    # pgvector's own built-in default of 20000 untouched. Confirmed via
+    # `SHOW hnsw.max_scan_tuples` against the installed pgvector 0.8.6.
+    # Applied via the same per-transaction `SET LOCAL` mechanism.
+    hnsw_max_scan_tuples: int | None = None
+
+    @field_validator("hnsw_max_scan_tuples")
+    @classmethod
+    def _validate_hnsw_max_scan_tuples(cls, value: int | None) -> int | None:
+        if value is None:
+            return value
+
+        if value < 1:
+            raise ValueError("hnsw_max_scan_tuples must be a positive integer.")
+
+        return value
+
+    # Memory multiplier for an iterative scan's internal tuple buffer.
+    # `None` (the default) leaves pgvector's own built-in default of 1
+    # untouched. Confirmed via `SHOW hnsw.scan_mem_multiplier` against the
+    # installed pgvector 0.8.6 (valid range 1-1000, enforced by Postgres
+    # itself, re-validated here too since this value is inlined into SQL --
+    # see `DocumentRepository.search_similar_chunks`). Applied via the same
+    # per-transaction `SET LOCAL` mechanism.
+    hnsw_scan_mem_multiplier: int | None = None
+
+    @field_validator("hnsw_scan_mem_multiplier")
+    @classmethod
+    def _validate_hnsw_scan_mem_multiplier(cls, value: int | None) -> int | None:
+        if value is None:
+            return value
+
+        if not (1 <= value <= 1000):
+            raise ValueError("hnsw_scan_mem_multiplier must be between 1 and 1000.")
+
+        return value
+
     # Server-side capability ceiling for retrieval trace capture. A client's
     # per-request `trace=true` can never force a trace when this is false --
     # see app.api.retrieval / app.api.research's `effective_trace` logic.
@@ -58,21 +168,168 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_app_name: str = "Production AI Research & Knowledge Agent"
 
-    # Query decomposition LLM configuration.
-    openrouter_decomposition_model: str = "gemma-4-31b-it:free"
+    # Shared OpenAI-compatible CLIENT settings -- both
+    # OpenRouterQueryDecompositionProvider and OpenRouterGenerationProvider
+    # construct their `AsyncOpenAI` client identically, so these describe
+    # the connection/transport, not a per-task sampling choice (same
+    # reasoning as openrouter_api_key/base_url/app_name above).
+    #
+    # `None` (the default) means "don't override the SDK's own default" --
+    # the `openai` SDK (confirmed via `inspect.signature(AsyncOpenAI.
+    # __init__)`, installed version 2.54.0) itself defaults `timeout` to a
+    # library-internal value when not given at all (passing `None`
+    # explicitly is different from omitting it -- see the provider code for
+    # how this distinction is preserved).
+    openrouter_timeout_seconds: float | None = None
+
+    @field_validator("openrouter_timeout_seconds")
+    @classmethod
+    def _validate_openrouter_timeout_seconds(cls, value: float | None) -> float | None:
+        if value is None:
+            return value
+
+        if value <= 0:
+            raise ValueError("openrouter_timeout_seconds must be a positive number of seconds.")
+
+        return value
+
+    # Matches the `openai` SDK's own current default (`max_retries=2`)
+    # exactly, so setting this explicitly changes nothing by default --
+    # the SDK already implements its own retry/backoff internally for
+    # retryable errors; this project does not add a second, custom retry
+    # loop on top of it.
+    openrouter_max_retries: int = 2
+
+    @field_validator("openrouter_max_retries")
+    @classmethod
+    def _validate_openrouter_max_retries(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("openrouter_max_retries must be a non-negative integer.")
+
+        return value
+
+    # Query decomposition LLM configuration -- independent of answer
+    # generation's settings below (see module docstring): a change to one
+    # task's model/sampling parameters never affects the other, and
+    # `OpenRouterQueryDecompositionProvider`/`OpenRouterGenerationProvider`
+    # each only ever receive their own `openrouter_{decomposition,
+    # generation}_*` prefix's values (see `app.core.dependencies`).
+    openrouter_decomposition_model: str = "openrouter/free"
     openrouter_decomposition_temperature: float = 0.0
     openrouter_decomposition_max_tokens: int | None = None
     openrouter_decomposition_top_p: float = 1.0
     openrouter_decomposition_response_format: dict[str, object] | None = None
     openrouter_decomposition_reasoning_effort: str | None = None
+    # OpenRouter-specific passthrough, NOT a standard OpenAI API field --
+    # sent via `extra_body={"top_k": ...}` (see
+    # OpenRouterQueryDecompositionProvider.decompose), only when configured.
+    # Not every upstream model honors it; an unsupported model simply
+    # ignores the field rather than erroring (OpenRouter's own passthrough
+    # contract), but this project sends it regardless of model choice since
+    # there is no reliable way to know in advance which models support it.
+    openrouter_decomposition_top_k: int | None = None
+    # Standard OpenAI chat-completion fields, included only when configured
+    # (same omit-when-None pattern as max_tokens/response_format/
+    # reasoning_effort above) -- valid range per the OpenAI API: -2.0 to 2.0.
+    openrouter_decomposition_frequency_penalty: float | None = None
+    openrouter_decomposition_presence_penalty: float | None = None
 
-    # Answer generation LLM configuration.
-    openrouter_generation_model: str = "gemma-4-31b-it:free"
+    @field_validator("openrouter_decomposition_top_k")
+    @classmethod
+    def _validate_openrouter_decomposition_top_k(cls, value: int | None) -> int | None:
+        return _validate_positive_top_k(value, "openrouter_decomposition_top_k")
+
+    @field_validator(
+        "openrouter_decomposition_frequency_penalty",
+        "openrouter_decomposition_presence_penalty",
+    )
+    @classmethod
+    def _validate_openrouter_decomposition_penalties(cls, value: float | None) -> float | None:
+        return _validate_penalty_range(value)
+
+    # Answer generation LLM configuration -- independent of query
+    # decomposition's settings above; see the matching comment there.
+    openrouter_generation_model: str = "openrouter/free"
     openrouter_generation_temperature: float = 0.2
     openrouter_generation_max_tokens: int | None = None
     openrouter_generation_top_p: float = 1.0
     openrouter_generation_response_format: dict[str, object] | None = None
     openrouter_generation_reasoning_effort: str | None = None
+    # OpenRouter-specific passthrough -- see the matching decomposition
+    # field's comment above; identical contract, independent value.
+    openrouter_generation_top_k: int | None = None
+    openrouter_generation_frequency_penalty: float | None = None
+    openrouter_generation_presence_penalty: float | None = None
+
+    @field_validator("openrouter_generation_top_k")
+    @classmethod
+    def _validate_openrouter_generation_top_k(cls, value: int | None) -> int | None:
+        return _validate_positive_top_k(value, "openrouter_generation_top_k")
+
+    @field_validator(
+        "openrouter_generation_frequency_penalty",
+        "openrouter_generation_presence_penalty",
+    )
+    @classmethod
+    def _validate_openrouter_generation_penalties(cls, value: float | None) -> float | None:
+        return _validate_penalty_range(value)
+
+    # Retrieval/reranking operational controls -- exposing existing
+    # hard-coded literals, not new algorithm behavior. Each default below
+    # is the EXACT value the code previously hard-coded, so leaving these
+    # unset changes nothing.
+    #
+    # Distinct from `hnsw_ef_search` (HNSW's own internal search breadth,
+    # above) -- this is the APPLICATION-level floor on how many candidate
+    # chunks are fetched from the database per sub-query before reranking
+    # (see `RetrievalService.search`'s `candidate_limit` parameter, which a
+    # caller can still override per-request; this only governs its
+    # default). Reranking itself has no separate "input count" control --
+    # it scores however many candidates this floor (or an explicit
+    # `candidate_limit`) produced (see `CrossEncoderReranker.rerank`'s own
+    # docstring); that is unchanged by this setting.
+    retrieval_candidate_limit_floor: int = 50
+
+    @field_validator("retrieval_candidate_limit_floor")
+    @classmethod
+    def _validate_retrieval_candidate_limit_floor(cls, value: int) -> int:
+        if not (1 <= value <= 1000):
+            raise ValueError("retrieval_candidate_limit_floor must be between 1 and 1000.")
+
+        return value
+
+    # Final number of results `POST /research/ask` asks RetrievalService
+    # for -- distinct from BOTH the HNSW search breadth and the candidate
+    # limit above: this is the post-rerank result COUNT returned to the
+    # answer-generation step, not how broadly the database/HNSW search.
+    # `POST /retrieval/search` already exposes an equivalent, independent,
+    # per-request `limit` field (`RetrievalSearchRequest.limit`, 1-50) --
+    # this setting is the server-side default for the endpoint that does
+    # NOT accept a per-request override.
+    research_ask_result_limit: int = 10
+
+    @field_validator("research_ask_result_limit")
+    @classmethod
+    def _validate_research_ask_result_limit(cls, value: int) -> int:
+        if not (1 <= value <= 50):
+            raise ValueError("research_ask_result_limit must be between 1 and 50.")
+
+        return value
+
+    # Hard ceiling on how many sub-queries (including the original query)
+    # QueryDecomposer.decompose will ever keep -- exposes the previously
+    # hard-coded `app.retrieval.decomposition.MAX_SUB_QUERIES` constant.
+    # Does not change decomposition's actual behavior/quality, only the
+    # bound on how many of the LLM's candidate sub-queries are kept.
+    query_decomposition_max_sub_queries: int = 5
+
+    @field_validator("query_decomposition_max_sub_queries")
+    @classmethod
+    def _validate_query_decomposition_max_sub_queries(cls, value: int) -> int:
+        if not (1 <= value <= 20):
+            raise ValueError("query_decomposition_max_sub_queries must be between 1 and 20.")
+
+        return value
 
     model_config = SettingsConfigDict(
         env_file=".env",

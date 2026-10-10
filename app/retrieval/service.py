@@ -40,12 +40,19 @@ class RetrievalService:
         reranker: Reranker | None = None,
         context_assembler: ContextAssembler | None = None,
         query_decomposer: QueryDecomposer | None = None,
+        candidate_limit_floor: int = 50,
     ) -> None:
         self.repository = repository
         self.embedding_provider = embedding_provider
         self.reranker = reranker
         self.context_assembler = context_assembler or ContextAssembler()
         self.query_decomposer = query_decomposer
+        # Defaults to the existing hard-coded literal (50), so constructing
+        # a RetrievalService without this argument (every existing call
+        # site, including unit tests) preserves today's exact behavior.
+        # Settings-backed via `Settings.retrieval_candidate_limit_floor` in
+        # production (see app.core.dependencies.get_retrieval_service).
+        self.candidate_limit_floor = candidate_limit_floor
         self.last_trace: RetrievalTrace | None = None
 
     async def search(
@@ -63,7 +70,7 @@ class RetrievalService:
         self.last_trace = None
 
         if candidate_limit is None:
-            candidate_limit = max(limit, 50)
+            candidate_limit = max(limit, self.candidate_limit_floor)
 
         if candidate_limit < limit:
             raise ValueError("candidate_limit must be greater than or equal to limit.")

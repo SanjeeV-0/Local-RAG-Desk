@@ -2,6 +2,15 @@
 stores `ChildChunk`s (from `app.ingestion.size_guard`) as `DocumentChunk`
 rows, plus their `ChunkPageMap` provenance rows. The last ingestion step
 before `DocumentService.mark_ready` promotes the version to READY/current.
+
+Embedding input is heading-aware (see `app.ingestion.embedding_text.
+build_embedding_text`) while `DocumentChunk.content` stores the chunk's
+ORIGINAL text unchanged -- the embedding model sees the chunk's section
+path as context, but nothing downstream (reranking, generation, the API)
+ever sees anything other than the original content. Any future re-embedding
+workflow MUST call the same `build_embedding_text` helper used here, never
+a second, divergent formatting implementation, or old and new vectors would
+not be directly comparable for reasons beyond just "the model changed".
 """
 
 from uuid import UUID
@@ -11,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.models import ChunkPageMap, DocumentChunk
 from app.core.repositories.document import DocumentRepository
 from app.embeddings.provider import EmbeddingProvider
+from app.ingestion.embedding_text import build_embedding_text
 from app.ingestion.size_guard import ChildChunk
 from app.ingestion.structure import UnitType
 
@@ -37,7 +47,11 @@ class ChunkService:
         if not chunks:
             return []
 
-        embeddings = self.embedding_provider.embed_batch([chunk.content for chunk in chunks])
+        embedding_texts = [
+            build_embedding_text(chunk.section_path, chunk.content) for chunk in chunks
+        ]
+
+        embeddings = self.embedding_provider.embed_batch(embedding_texts)
 
         if len(embeddings) != len(chunks):
             raise ValueError(

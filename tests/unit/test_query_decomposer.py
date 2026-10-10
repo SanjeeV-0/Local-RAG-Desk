@@ -134,6 +134,44 @@ async def test_maximum_five_queries_are_enforced() -> None:
 
 
 @pytest.mark.asyncio
+async def test_configured_max_sub_queries_is_actually_used() -> None:
+    """Settings-backed `max_sub_queries` (default 5, matching the previous
+    hard-coded MAX_SUB_QUERIES constant) must actually bound the result --
+    not just be accepted and ignored."""
+
+    decomposer = QueryDecomposer(
+        StubProvider(
+            [
+                "Query one",
+                "Query two",
+                "Query three",
+            ]
+        ),
+        max_sub_queries=2,
+    )
+
+    result = await decomposer.decompose("Original question")
+
+    assert len(result.sub_queries) == 2
+    assert result.sub_queries[0] == "Original question"
+
+
+@pytest.mark.asyncio
+async def test_default_max_sub_queries_matches_previous_hard_coded_constant() -> None:
+    """Constructing QueryDecomposer without `max_sub_queries` (every
+    existing call site before this milestone) must preserve the exact
+    previous hard-coded behavior (5)."""
+
+    decomposer = QueryDecomposer(
+        StubProvider([f"Query {i}" for i in range(10)]),
+    )
+
+    result = await decomposer.decompose("Original question")
+
+    assert len(result.sub_queries) == 5
+
+
+@pytest.mark.asyncio
 async def test_empty_generated_queries_are_ignored() -> None:
     decomposer = QueryDecomposer(
         StubProvider(

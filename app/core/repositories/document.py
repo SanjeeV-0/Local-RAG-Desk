@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.models import (
@@ -24,8 +24,65 @@ class DocumentRepository:
     one place that knows the actual table/column shapes.
     """
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        hnsw_ef_search: int | None = None,
+        hnsw_iterative_scan: str | None = None,
+        hnsw_max_scan_tuples: int | None = None,
+        hnsw_scan_mem_multiplier: int | None = None,
+    ) -> None:
         self.session = session
+        # Every one of these four is validated upstream by `Settings` (see
+        # its field validators / `Literal` type for each) before ever
+        # reaching here -- never taken from unvalidated/user-controlled
+        # input, since each is inlined directly into its own `SET LOCAL`
+        # statement below (PostgreSQL's `SET` does not support bind
+        # parameters at all -- confirmed: a parameterized `SET LOCAL
+        # hnsw.ef_search = :value` raises a native syntax error, not merely
+        # "unsupported" -- so these must be plain validated values, never
+        # strings built from request input).
+        self.hnsw_ef_search = hnsw_ef_search
+        self.hnsw_iterative_scan = hnsw_iterative_scan
+        self.hnsw_max_scan_tuples = hnsw_max_scan_tuples
+        self.hnsw_scan_mem_multiplier = hnsw_scan_mem_multiplier
+
+    async def _apply_hnsw_session_settings(self) -> None:
+        """Issue one `SET LOCAL` per configured HNSW query-time GUC, scoped
+        to the CURRENT transaction only.
+
+        Called as the first thing `search_similar_chunks` does, before
+        building/executing the actual vector query, so every configured GUC
+        is in effect for that query. PostgreSQL reverts `SET LOCAL` values
+        automatically at the end of the transaction (commit or rollback) --
+        this is what makes it safe on a pooled connection reused by a later,
+        unrelated request; this method never issues a bare session-level
+        `SET` and never resets anything itself.
+        """
+
+        if self.hnsw_ef_search is not None:
+            await self.session.execute(text(f"SET LOCAL hnsw.ef_search = {self.hnsw_ef_search}"))
+
+        if self.hnsw_iterative_scan is not None:
+            # `hnsw_iterative_scan` is typed as a `Literal["off",
+            # "relaxed_order", "strict_order"]` in `Settings`, so by the
+            # time it reaches here it can only ever be one of those three
+            # exact strings -- safe to inline as a bare (unquoted) SQL
+            # identifier-like value, which is the syntax `SET` expects for
+            # this enum GUC (quoting it would itself be a syntax error).
+            await self.session.execute(
+                text(f"SET LOCAL hnsw.iterative_scan = {self.hnsw_iterative_scan}")
+            )
+
+        if self.hnsw_max_scan_tuples is not None:
+            await self.session.execute(
+                text(f"SET LOCAL hnsw.max_scan_tuples = {self.hnsw_max_scan_tuples}")
+            )
+
+        if self.hnsw_scan_mem_multiplier is not None:
+            await self.session.execute(
+                text(f"SET LOCAL hnsw.scan_mem_multiplier = {self.hnsw_scan_mem_multiplier}")
+            )
 
     async def get_by_id(self, document_id: UUID) -> Document | None:
         result = await self.session.execute(select(Document).where(Document.id == document_id))
@@ -113,7 +170,19 @@ class DocumentRepository:
         app.ingestion.structure_extractor) is still returned, with
         section_path reported as NULL, rather than being silently excluded
         by an inner join.
+
+        Any configured HNSW query-time GUC (`hnsw_ef_search`,
+        `hnsw_iterative_scan`, `hnsw_max_scan_tuples`,
+        `hnsw_scan_mem_multiplier`) is applied via `SET LOCAL` as the first
+        statements of whatever transaction this call runs in -- see
+        `_apply_hnsw_session_settings` for the full scoping rationale (never
+        a bare session-level `SET`; PostgreSQL reverts `SET LOCAL`
+        automatically at the end of the transaction, which is what makes
+        this safe on a pooled connection reused by a later, unrelated
+        request).
         """
+
+        await self._apply_hnsw_session_settings()
 
         distance = DocumentChunk.embedding.cosine_distance(query_embedding)
 

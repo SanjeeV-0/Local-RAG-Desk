@@ -180,3 +180,55 @@ async def test_retrieval_service_clears_previous_trace() -> None:
     )
 
     assert service.last_trace is None
+
+
+@pytest.mark.asyncio
+async def test_default_candidate_limit_floor_matches_previous_hard_coded_value() -> None:
+    """Constructing RetrievalService without `candidate_limit_floor` (every
+    existing call site before this milestone) must preserve the exact
+    previous hard-coded behavior: candidate_limit defaults to
+    max(limit, 50)."""
+
+    repository = FakeRepository([_chunk(1)])
+
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    await service.search("query", limit=5)
+
+    assert repository.received_limit == 50
+
+
+@pytest.mark.asyncio
+async def test_configured_candidate_limit_floor_is_actually_used() -> None:
+    repository = FakeRepository([_chunk(1)])
+
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=FakeEmbeddingProvider(),
+        candidate_limit_floor=200,
+    )
+
+    await service.search("query", limit=5)
+
+    assert repository.received_limit == 200
+
+
+@pytest.mark.asyncio
+async def test_configured_candidate_limit_floor_does_not_override_a_larger_explicit_limit() -> None:
+    """The floor is a MINIMUM, not a cap -- an explicit `limit` larger than
+    the configured floor must still win (matches `max(limit, floor)`)."""
+
+    repository = FakeRepository([_chunk(1)])
+
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=FakeEmbeddingProvider(),
+        candidate_limit_floor=10,
+    )
+
+    await service.search("query", limit=30)
+
+    assert repository.received_limit == 30

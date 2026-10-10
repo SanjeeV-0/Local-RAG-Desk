@@ -1,14 +1,24 @@
 """The only `GenerationProvider` implementation: calls the answer-generation
 LLM through OpenRouter's OpenAI-compatible API.
 
-`temperature`/`max_tokens`/`top_p`/`response_format`/`reasoning_effort` are
-explicit, per-instance configuration (sourced from
-`Settings.openrouter_generation_*` via `app.core.dependencies.
-get_generation_provider`) rather than left to whatever the selected
-OpenRouter model defaults to. `max_tokens`/`response_format`/
-`reasoning_effort` are optional -- only included in the actual request when
+`temperature`/`max_tokens`/`top_p`/`response_format`/`reasoning_effort`/
+`top_k`/`frequency_penalty`/`presence_penalty` are explicit, per-instance
+configuration (sourced from `Settings.openrouter_generation_*` via
+`app.core.dependencies.get_generation_provider`) rather than left to
+whatever the selected OpenRouter model defaults to. `max_tokens`/
+`response_format`/`reasoning_effort`/`top_k`/`frequency_penalty`/
+`presence_penalty` are optional -- only included in the actual request when
 configured (not `None`); `temperature`/`top_p` are always sent explicitly.
-No retry/timeout handling is added here.
+
+`top_k` is NOT part of the OpenAI chat-completion API -- it is an
+OpenRouter-specific passthrough field, sent via `extra_body` rather than as
+a direct keyword argument (see `generate` below), and only an upstream
+model that actually supports it will honor it; this is a deliberate
+exception to "send every configured field as a plain kwarg".
+
+No custom retry loop is implemented -- `max_retries` is passed straight
+through to `AsyncOpenAI`, which already implements its own retry/backoff
+internally for retryable errors.
 """
 
 from openai import AsyncOpenAI
@@ -31,6 +41,11 @@ class OpenRouterGenerationProvider:
         reasoning_effort: str | None,
         base_url: str = "https://openrouter.ai/api/v1",
         app_name: str = "Production AI Research & Knowledge Agent",
+        top_k: int | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
+        timeout: float | None = None,
+        max_retries: int = 2,
     ) -> None:
         self.model = model
         self.temperature = temperature
@@ -38,14 +53,28 @@ class OpenRouterGenerationProvider:
         self.top_p = top_p
         self.response_format = response_format
         self.reasoning_effort = reasoning_effort
+        self.top_k = top_k
+        self.frequency_penalty = frequency_penalty
+        self.presence_penalty = presence_penalty
 
-        self.client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            default_headers={
+        # `timeout` is only passed to the client when actually configured --
+        # the `openai` SDK distinguishes "not given at all" (its own
+        # library-internal default applies) from an explicit value, so an
+        # unconfigured (`None`) setting here must not become an explicit
+        # `timeout=None` override of that distinction.
+        client_kwargs: dict[str, object] = {
+            "api_key": api_key,
+            "base_url": base_url,
+            "default_headers": {
                 "X-Title": app_name,
             },
-        )
+            "max_retries": max_retries,
+        }
+
+        if timeout is not None:
+            client_kwargs["timeout"] = timeout
+
+        self.client = AsyncOpenAI(**client_kwargs)
 
     async def generate(
         self,
@@ -55,9 +84,10 @@ class OpenRouterGenerationProvider:
         """Generate an answer using OpenRouter."""
 
         # `temperature`/`top_p` are always explicit, configured values.
-        # `max_tokens`/`response_format`/`reasoning_effort` are only
-        # included when actually configured (not None), so an unconfigured
-        # field never reaches the API as an explicit override.
+        # `max_tokens`/`response_format`/`reasoning_effort`/
+        # `frequency_penalty`/`presence_penalty` are only included when
+        # actually configured (not None), so an unconfigured field never
+        # reaches the API as an explicit override.
         request_kwargs: dict[str, object] = {
             "model": self.model,
             "temperature": self.temperature,
@@ -88,6 +118,19 @@ class OpenRouterGenerationProvider:
 
         if self.reasoning_effort is not None:
             request_kwargs["reasoning_effort"] = self.reasoning_effort
+
+        if self.frequency_penalty is not None:
+            request_kwargs["frequency_penalty"] = self.frequency_penalty
+
+        if self.presence_penalty is not None:
+            request_kwargs["presence_penalty"] = self.presence_penalty
+
+        if self.top_k is not None:
+            # OpenRouter-specific passthrough, not a standard OpenAI field --
+            # must travel via extra_body, never as a direct kwarg (the
+            # openai SDK's typed `.create()` has no `top_k` parameter at
+            # all).
+            request_kwargs["extra_body"] = {"top_k": self.top_k}
 
         response = await self.client.chat.completions.create(**request_kwargs)
 

@@ -1243,10 +1243,10 @@ all, and offline evaluation's implementation is partial as described above.
 ### 21.1 Runtime configuration (`app/config/settings.py`, `Settings` — Pydantic `BaseSettings`,
 reads from `.env` via `pydantic-settings`, case-insensitive, `extra="ignore"`)
 
-> **Important:** `.env.example` in this repository currently documents only `APP_NAME`,
-> `APP_VERSION`, `ENVIRONMENT`, `LOG_LEVEL`, and `DATABASE_URL`. Every other setting below has
-> a working code-level default but is **not** exemplified in `.env.example` — if you need to
-> override one, add it to your own `.env` using the same `UPPER_SNAKE_CASE` name as the field.
+> **Note:** `.env.example` documents every setting listed below (kept in sync as of this
+> milestone). If a future setting is added without updating `.env.example`, it still works via
+> its environment variable using the same `UPPER_SNAKE_CASE` name as the Python field — reading
+> this table (or `app/config/settings.py` directly) remains the authoritative source either way.
 
 | Env var | Python field | Type | Default | Group | Effect |
 |---|---|---|---|---|---|
@@ -1265,9 +1265,50 @@ reads from `.env` via `pydantic-settings`, case-insensitive, `extra="ignore"`)
 | `LANGFUSE_BASE_URL` | `langfuse_base_url` | `str` | `"https://cloud.langfuse.com"` | Observability | Langfuse client base URL |
 | `LANGFUSE_ENVIRONMENT` | `langfuse_environment` | `str` | `"development"` | Observability | Tag reported to Langfuse |
 | `OPENROUTER_API_KEY` | `openrouter_api_key` | `str \| None` | `None` | OpenRouter/LLM | Required (raises if missing) by **both** the decomposition provider and the generation provider — see §11 |
-| `OPENROUTER_MODEL` | `openrouter_model` | `str` | `"meta-llama/llama-3.3-8b-instruct:free"` | OpenRouter/LLM | Used for **both** query decomposition and answer generation — there is only one model setting, shared |
 | `OPENROUTER_BASE_URL` | `openrouter_base_url` | `str` | `"https://openrouter.ai/api/v1"` | OpenRouter/LLM | Base URL for both OpenRouter clients |
 | `OPENROUTER_APP_NAME` | `openrouter_app_name` | `str` | `"Production AI Research & Knowledge Agent"` | OpenRouter/LLM | Sent as the `X-Title` header on both OpenRouter clients |
+| `OPENROUTER_TIMEOUT_SECONDS` | `openrouter_timeout_seconds` | `float \| None` | `None` | OpenRouter/LLM (shared) | **Shared** by both providers' `AsyncOpenAI` client construction. `None` = don't override the `openai` SDK's own default timeout (distinct from passing `timeout=None` explicitly). Must be > 0 when set. |
+| `OPENROUTER_MAX_RETRIES` | `openrouter_max_retries` | `int` | `2` | OpenRouter/LLM (shared) | **Shared** by both providers. Matches the `openai` SDK's own current default exactly — the SDK already retries retryable errors internally; this project adds no custom retry loop. Must be ≥ 0. |
+
+> `openrouter_decomposition_*` and `openrouter_generation_*` below are configured **independently** — each provider only ever reads its own prefix's fields (see `app/core/dependencies.py::get_query_decomposition_provider` / `get_generation_provider`, and `tests/unit/test_query_decomposition_dependencies.py`'s cross-contamination test). Changing one task's settings never affects the other.
+
+| Env var | Python field | Type | Default | Effect |
+|---|---|---|---|---|
+| `OPENROUTER_DECOMPOSITION_MODEL` | `openrouter_decomposition_model` | `str` | `"openrouter/free"` | Model used only for query decomposition |
+| `OPENROUTER_DECOMPOSITION_TEMPERATURE` | `openrouter_decomposition_temperature` | `float` | `0.0` | Sampling temperature, always sent explicitly |
+| `OPENROUTER_DECOMPOSITION_MAX_TOKENS` | `openrouter_decomposition_max_tokens` | `int \| None` | `None` | Omitted from the request when unset |
+| `OPENROUTER_DECOMPOSITION_TOP_P` | `openrouter_decomposition_top_p` | `float` | `1.0` | Always sent explicitly |
+| `OPENROUTER_DECOMPOSITION_RESPONSE_FORMAT` | `openrouter_decomposition_response_format` | `dict \| None` | `None` | Omitted when unset |
+| `OPENROUTER_DECOMPOSITION_REASONING_EFFORT` | `openrouter_decomposition_reasoning_effort` | `str \| None` | `None` | Omitted when unset |
+| `OPENROUTER_DECOMPOSITION_TOP_K` | `openrouter_decomposition_top_k` | `int \| None` | `None` | **OpenRouter-specific passthrough**, sent via `extra_body={"top_k": ...}` — NOT a standard OpenAI field, not every upstream model honors it. Omitted when unset. Must be a positive integer when set. |
+| `OPENROUTER_DECOMPOSITION_FREQUENCY_PENALTY` | `openrouter_decomposition_frequency_penalty` | `float \| None` | `None` | Standard OpenAI field, omitted when unset. Valid range -2.0 to 2.0. |
+| `OPENROUTER_DECOMPOSITION_PRESENCE_PENALTY` | `openrouter_decomposition_presence_penalty` | `float \| None` | `None` | Standard OpenAI field, omitted when unset. Valid range -2.0 to 2.0. |
+| `OPENROUTER_GENERATION_MODEL` | `openrouter_generation_model` | `str` | `"openrouter/free"` | Model used only for answer generation |
+| `OPENROUTER_GENERATION_TEMPERATURE` | `openrouter_generation_temperature` | `float` | `0.2` | Sampling temperature, always sent explicitly |
+| `OPENROUTER_GENERATION_MAX_TOKENS` | `openrouter_generation_max_tokens` | `int \| None` | `None` | Omitted from the request when unset |
+| `OPENROUTER_GENERATION_TOP_P` | `openrouter_generation_top_p` | `float` | `1.0` | Always sent explicitly |
+| `OPENROUTER_GENERATION_RESPONSE_FORMAT` | `openrouter_generation_response_format` | `dict \| None` | `None` | Omitted when unset |
+| `OPENROUTER_GENERATION_REASONING_EFFORT` | `openrouter_generation_reasoning_effort` | `str \| None` | `None` | Omitted when unset |
+| `OPENROUTER_GENERATION_TOP_K` | `openrouter_generation_top_k` | `int \| None` | `None` | Same OpenRouter-specific `extra_body` passthrough contract as decomposition's, independent value. Must be a positive integer when set. |
+| `OPENROUTER_GENERATION_FREQUENCY_PENALTY` | `openrouter_generation_frequency_penalty` | `float \| None` | `None` | Standard OpenAI field, omitted when unset. Valid range -2.0 to 2.0. |
+| `OPENROUTER_GENERATION_PRESENCE_PENALTY` | `openrouter_generation_presence_penalty` | `float \| None` | `None` | Standard OpenAI field, omitted when unset. Valid range -2.0 to 2.0. |
+
+**pgvector HNSW query-time configuration** (installed pgvector version confirmed as `0.8.6` against this project's configured database via `SELECT extversion FROM pg_extension WHERE extname='vector'`). All four below are query-time GUCs only — **none change the HNSW index's build parameters** (`m`, `ef_construction`, set once in `alembic/versions/86b2f3d39bfd_*` and never touched by these settings). Each is applied via a `SET LOCAL` inside the exact same transaction as the vector search query (`DocumentRepository.search_similar_chunks`/`_apply_hnsw_session_settings`) — PostgreSQL guarantees `SET LOCAL` reverts at that transaction's end (commit or rollback), which is what makes this safe on a pooled connection reused by a later, unrelated request; this project never issues a bare session-level `SET` for any of these.
+
+| Env var | Python field | Type | Default | Effect |
+|---|---|---|---|---|
+| `HNSW_EF_SEARCH` | `hnsw_ef_search` | `int \| None` | `None` | `None` = leave pgvector's own built-in default (40) untouched. Valid range 1-1000. |
+| `HNSW_ITERATIVE_SCAN` | `hnsw_iterative_scan` | `Literal["off","relaxed_order","strict_order"] \| None` | `None` | `None` = leave pgvector's own built-in default (`"off"`) untouched. |
+| `HNSW_MAX_SCAN_TUPLES` | `hnsw_max_scan_tuples` | `int \| None` | `None` | `None` = leave pgvector's own built-in default (20000) untouched. Must be a positive integer when set. |
+| `HNSW_SCAN_MEM_MULTIPLIER` | `hnsw_scan_mem_multiplier` | `int \| None` | `None` | `None` = leave pgvector's own built-in default (1) untouched. Valid range 1-1000. |
+
+**Retrieval/reranking operational controls** — each default below is the *exact* value this project previously hard-coded, so leaving these unset changes nothing. Keep these four concepts distinct: `HNSW_EF_SEARCH` above (HNSW's own internal search breadth) → `RETRIEVAL_CANDIDATE_LIMIT_FLOOR` (application-level candidate-pool floor) → `RESEARCH_ASK_RESULT_LIMIT` (final result count, `/research/ask` only) → reranker input count (no separate control — the reranker always scores however many candidates the floor/explicit `candidate_limit` produced; see `CrossEncoderReranker.rerank`'s own docstring, unchanged by this milestone).
+
+| Env var | Python field | Type | Default | Effect |
+|---|---|---|---|---|
+| `RETRIEVAL_CANDIDATE_LIMIT_FLOOR` | `retrieval_candidate_limit_floor` | `int` | `50` | Default `candidate_limit` floor in `RetrievalService.search` when a caller doesn't pass one explicitly (`max(limit, floor)`). Valid range 1-1000. |
+| `RESEARCH_ASK_RESULT_LIMIT` | `research_ask_result_limit` | `int` | `10` | Final result count `POST /research/ask` requests from `RetrievalService.search` (not request-overridable — `POST /retrieval/search` already exposes an equivalent per-request `limit`, 1-50). Valid range 1-50. |
+| `QUERY_DECOMPOSITION_MAX_SUB_QUERIES` | `query_decomposition_max_sub_queries` | `int` | `5` | Hard ceiling on kept sub-queries (including the original) in `QueryDecomposer`. Valid range 1-20. |
 
 ### 21.2 Hard-coded tunable constants (changing these requires a code change, not a config change)
 
@@ -1276,15 +1317,13 @@ reads from `.env` via `pydantic-settings`, case-insensitive, `extra="ignore"`)
 | Semantic shredding similarity threshold | `0.7` | `app/ingestion/service.py` (literal passed to `shred_semantically`) | How aggressively adjacent paragraphs are grouped into one chunk before size-guarding |
 | Chunk token budget | `500` | `app/ingestion/service.py` (literal passed to `apply_size_guard`) | Maximum "tokens" (whitespace-split words) per final chunk |
 | Token estimator | whitespace word count | `app/ingestion/size_guard.py::estimate_tokens` | Not a real tokenizer — explicitly documented in code as a deterministic placeholder |
-| Decomposition `temperature` | `0` | `app/retrieval/openrouter_decomposition.py` | Deterministic decomposition output |
-| Decomposition max sub-queries | `5` | `app/retrieval/decomposition.py::MAX_SUB_QUERIES` | Upper bound on `sub_queries` length (including the original) |
 | Generation prompt / system message | fixed strings | `app/generation/openrouter.py` | The instruction given to the generation LLM |
 | Decomposition prompt / system message | fixed strings | `app/retrieval/openrouter_decomposition.py` | The instruction given to the decomposition LLM |
-| Default `candidate_limit` | `max(limit, 50)` | `app/retrieval/service.py::RetrievalService.search` | Per-sub-query candidate pool size when the caller doesn't specify one (neither HTTP API does) |
-| Research final `limit` | `10` | `app/api/research.py::_execute_research` | Top K passed to `RetrievalService.search` for `/research/ask` (not configurable per-request) |
 | Embedding vector dimension | `384` | `app/core/models.py` (`Vector(384)`) | Must match the embedding model's output dimension; changing the model to a different dimension requires a schema migration |
-| HNSW index build params (`m`, `ef_construction`) | pgvector library defaults (not overridden) | `alembic/versions/86b2f3d39bfd_*` | Not set in this repository at all |
+| HNSW index build params (`m`, `ef_construction`) | pgvector library defaults (not overridden) | `alembic/versions/86b2f3d39bfd_*` | Not set in this repository at all — deliberately out of scope for the query-time settings above |
 | `GenerationResult.input_tokens` etc. | — | — | *Not* hard-coded — taken from `response.usage` when present |
+
+> Previously listed here and now Settings-backed instead (see §21.1 above): decomposition `temperature` (now `OPENROUTER_DECOMPOSITION_TEMPERATURE`, always was a field — this row was stale), decomposition max sub-queries (now `QUERY_DECOMPOSITION_MAX_SUB_QUERIES`), default `candidate_limit` (now `RETRIEVAL_CANDIDATE_LIMIT_FLOOR`), and the research final `limit` (now `RESEARCH_ASK_RESULT_LIMIT`).
 
 ### 21.3 Data/schema-dependent settings
 
@@ -1292,19 +1331,33 @@ reads from `.env` via `pydantic-settings`, case-insensitive, `extra="ignore"`)
   fixed-width `Vector(384)`. Changing to a model with a different output dimension requires a
   migration to alter the column **and** re-embedding every existing chunk; even a
   same-dimension swap requires re-embedding (old and new vectors are not comparable).
-- `RERANKER_MODEL`/`OPENROUTER_MODEL` changes take effect on the next process start (both are
-  `@lru_cache`d factories in `app/core/dependencies.py`) and do not require any data migration
-  — they only change how future requests are scored/generated.
+- `RERANKER_MODEL`/`OPENROUTER_{DECOMPOSITION,GENERATION}_MODEL` changes take effect on the next
+  process start (the reranker/embedding-provider factories are `@lru_cache`d in
+  `app/core/dependencies.py`; the two OpenRouter provider factories are also `@lru_cache`d) and
+  do not require any data migration — they only change how future requests are scored/generated.
+- `HNSW_EF_SEARCH`/`HNSW_ITERATIVE_SCAN`/`HNSW_MAX_SCAN_TUPLES`/`HNSW_SCAN_MEM_MULTIPLIER` take
+  effect on the very next request (read fresh from `Settings` per request in
+  `get_retrieval_service`, applied per-transaction) — no process restart or migration needed.
 
 ### 21.4 Architectural decisions (not configuration — would require code changes to alter)
 
-- Decomposition and generation sharing one `OPENROUTER_MODEL` setting (two separate models
-  would require adding a new setting and threading it through `get_query_decomposition_provider`
-  and `get_generation_provider` separately).
+- Decomposition and generation are configured **independently** (`OPENROUTER_DECOMPOSITION_*`
+  vs. `OPENROUTER_GENERATION_*`) — this is already the case, not a future possibility; a truly
+  shared setting would require deliberately collapsing the two prefixes back into one.
+- No fallback-model mechanism exists for either OpenRouter provider (a primary-request failure
+  is not retried against a different model) — explicitly out of scope for the configuration
+  milestone that added `OPENROUTER_MAX_RETRIES`/`OPENROUTER_TIMEOUT_SECONDS`; adding one is a new
+  control-flow path, not just another passthrough setting.
+- No caching layer exists at any level (embeddings, query decomposition, LLM responses, or
+  provider prompt caching) — evaluated and deliberately deferred; see the project's own
+  configuration-audit notes for the per-layer benefit/risk tradeoffs considered.
 - The reranker is unconditionally present (no "retrieval without reranking" configuration path
   exists in the DI wiring, even though `RetrievalService` itself supports `reranker=None`).
 - There is exactly one retrieval implementation shared by both `/retrieval/search` and
   `/research/ask` (not a configuration toggle — a structural fact about `app/core/dependencies.py`).
+- Reranking has no separate "input count" setting — it always scores the entire deduplicated
+  candidate pool produced by `RETRIEVAL_CANDIDATE_LIMIT_FLOOR`/an explicit `candidate_limit`;
+  adding a distinct reranker-input cutoff was explicitly out of scope for this milestone.
 
 ---
 
