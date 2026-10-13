@@ -148,10 +148,16 @@ export const TracePanel: React.FC<TracePanelProps> = ({ trace }) => {
                   </div>
                   {isOpen && (
                     <div className="trace-chunk-content">
-                      <div style={{ display: 'flex', gap: '1.5rem', marginBottom: '0.75rem', fontSize: '0.72rem', color: '#94a3b8' }}>
-                        <span>Doc ID: <strong style={{ color: '#f8fafc' }}>{cand.document_id}</strong></span>
-                        <span>Chunk ID: <strong style={{ color: '#f8fafc' }}>{cand.chunk_id}</strong></span>
-                        <span>Pages: <strong style={{ color: '#f8fafc' }}>{cand.page_numbers?.join(', ') || 'N/A'}</strong></span>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1.5rem', marginBottom: '0.75rem', fontSize: '0.72rem', color: '#94a3b8' }}>
+                        <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
+                          Doc ID: <strong style={{ color: '#f8fafc' }}>{cand.document_id}</strong>
+                        </span>
+                        <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
+                          Chunk ID: <strong style={{ color: '#f8fafc' }}>{cand.chunk_id}</strong>
+                        </span>
+                        <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
+                          Pages: <strong style={{ color: '#f8fafc' }}>{cand.page_numbers?.join(', ') || 'N/A'}</strong>
+                        </span>
                       </div>
                       <div>{cand.content}</div>
                     </div>

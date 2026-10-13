@@ -2,6 +2,7 @@ import React, { useRef, useState } from 'react';
 import { UploadCloud, X, AlertTriangle, FileText, Copy, ArrowRight } from 'lucide-react';
 import { uploadDocument, DocumentApiUnavailableError } from '../api/documents';
 import { DocumentUploadResult, LogicalDocumentSummary } from '../types/document';
+import { useModalA11y } from '../hooks/useModalA11y';
 
 interface UploadDocumentModalProps {
   isOpen: boolean;
@@ -47,8 +48,7 @@ export const UploadDocumentModal: React.FC<UploadDocumentModalProps> = ({
   // silently closing as if a new upload had succeeded.
   const [duplicateResult, setDuplicateResult] = useState<DocumentUploadResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  if (!isOpen) return null;
+  const modalRef = useRef<HTMLDivElement>(null);
 
   const reset = () => {
     setFile(null);
@@ -68,6 +68,14 @@ export const UploadDocumentModal: React.FC<UploadDocumentModalProps> = ({
     reset();
     onClose();
   };
+
+  useModalA11y(modalRef, {
+    isOpen,
+    onClose: handleClose,
+    closeDisabled: isUploading,
+  });
+
+  if (!isOpen) return null;
 
   const handleFileSelected = (selected: File | null) => {
     setFile(selected);
@@ -132,6 +140,7 @@ export const UploadDocumentModal: React.FC<UploadDocumentModalProps> = ({
     <div className="modal-backdrop" onClick={handleClose}>
       <div
         className="modal-container glass-card"
+        ref={modalRef}
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
@@ -157,7 +166,7 @@ export const UploadDocumentModal: React.FC<UploadDocumentModalProps> = ({
           </button>
         </div>
 
-        <form onSubmit={handleSubmit}>
+        <form className="modal-form" onSubmit={handleSubmit}>
           <div className="modal-body">
             <p className="modal-description">
               Select a file to ingest into the knowledge corpus. It will be

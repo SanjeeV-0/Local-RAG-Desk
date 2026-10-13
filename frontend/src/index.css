@@ -249,10 +249,19 @@ button {
   position: relative;
   width: 44px;
   height: 24px;
+  padding: 0;
   background: #334155;
   border-radius: 9999px;
   cursor: pointer;
   transition: background-color 0.25s ease;
+  /* Neutralizes native <button> UA chrome (this class is now applied to a
+     real <button> for keyboard activation -- see Header.tsx) so it still
+     renders as the plain pill it was as a <div>; `border`/`outline` are
+     already reset globally for every button (see the `button {}` rule
+     above). */
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-block;
 }
 
 .toggle-switch.active {
@@ -722,6 +731,8 @@ button {
   max-height: 350px;
   overflow-y: auto;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 /* Download JSON Bar */
@@ -995,7 +1006,25 @@ button {
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg), 0 0 30px rgba(0, 0, 0, 0.8);
   animation: modalEnter 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  /* Clips the container's own corners/animation, NOT a scroll boundary --
+     the one scrollable region is `.modal-body` (and, for the upload
+     modal, via `.modal-form` wrapping it -- see below). Without the
+     flex column + max-height pair below, long modal content (a tall
+     `.modal-details-box`, or the upload modal's conditional banners)
+     has no height ceiling and nothing to scroll inside, so `overflow:
+     hidden` here would silently clip the footer's action buttons
+     instead of making the content scrollable. */
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  /* `100vh` first as a baseline for browsers without `dvh` support (an
+     invalid `dvh` value is dropped at parse time, leaving this in
+     effect); `100dvh` second so mobile browsers that resize the visual
+     viewport for on-screen chrome (address bar, keyboard) don't let the
+     modal claim height that isn't actually visible. 2rem matches
+     `.modal-backdrop`'s 1rem top + 1rem bottom padding exactly. */
+  max-height: calc(100vh - 2rem);
+  max-height: calc(100dvh - 2rem);
 }
 
 @keyframes modalEnter {
@@ -1015,6 +1044,9 @@ button {
   justify-content: space-between;
   padding: 1.25rem 1.5rem;
   border-bottom: 1px solid var(--border-subtle);
+  /* Pinned: never shrinks when `.modal-body` below it needs the space to
+     scroll instead. */
+  flex-shrink: 0;
 }
 
 .modal-icon-badge {
@@ -1053,6 +1085,27 @@ button {
 
 .modal-body {
   padding: 1.5rem;
+  /* The one scroll region in either modal. `min-height: 0` overrides the
+     flex-item default of `min-height: auto`, which would otherwise keep
+     this item sized to its content and prevent it from ever shrinking
+     enough to need (or allow) scrolling. */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Wraps `.modal-body` + `.modal-footer` in UploadDocumentModal only --
+   ConfirmModal has no <form> and does not use this class (its
+   `.modal-header`/`.modal-body`/`.modal-footer` are already direct
+   `.modal-container` flex children). This class makes the <form> itself
+   participate in `.modal-container`'s flex column so `.modal-body` can
+   still flex/scroll while `.modal-footer` stays pinned below it, without
+   restructuring the existing header/form DOM split. */
+.modal-form {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 
 .modal-description {
@@ -1079,6 +1132,9 @@ button {
   padding: 1rem 1.5rem;
   border-top: 1px solid var(--border-subtle);
   background: rgba(15, 23, 42, 0.4);
+  /* Pinned: stays reachable below `.modal-body`'s scroll area instead of
+     shrinking or being pushed out of view. */
+  flex-shrink: 0;
 }
 
 /* ==========================================================================
@@ -1135,6 +1191,25 @@ button {
   background: rgba(15, 23, 42, 0.5);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
+}
+
+/* Document Library card grid. Desktop layout (auto-fill at a 360px floor)
+   is unchanged from before. Below 640px -- matching this file's existing
+   header/input-actions breakpoint -- the 360px floor can exceed the
+   available content width (at 375px viewport, `.app-container`'s padding
+   alone leaves ~327px), which `auto-fill`/`minmax` cannot shrink below;
+   the single-column override removes that arithmetic entirely rather than
+   picking a new, still-fragile floor value. */
+.documents-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 1.25rem;
+}
+
+@media (max-width: 640px) {
+  .documents-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .doc-card {

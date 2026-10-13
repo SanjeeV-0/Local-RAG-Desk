@@ -94,6 +94,10 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
       }
     } catch (err: any) {
       setError(err?.message || 'Failed to execute vector retrieval search.');
+      // Clear the previous successful response so stale chunks from an
+      // earlier query can never be displayed as though they answer this
+      // failed request.
+      setResponse(null);
     } finally {
       setIsLoading(false);
     }

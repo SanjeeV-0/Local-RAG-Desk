@@ -618,7 +618,15 @@ export const DocumentWorkspace: React.FC<DocumentWorkspaceProps> = ({
                     )}
 
                     {/* Technical version metadata drawer */}
-                    <div style={{ marginTop: '0.75rem', fontSize: '0.72rem', color: '#64748b', fontFamily: 'var(--font-mono)' }}>
+                    <div
+                      style={{
+                        marginTop: '0.75rem',
+                        fontSize: '0.72rem',
+                        color: '#64748b',
+                        fontFamily: 'var(--font-mono)',
+                        overflowWrap: 'anywhere',
+                      }}
+                    >
                       Version ID: {version.id}
                     </div>
                   </div>
@@ -721,7 +729,7 @@ export const DocumentWorkspace: React.FC<DocumentWorkspaceProps> = ({
           </div>
 
           {/* Document Cards Grid */}
-          <div className="documents-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: '1.25rem' }}>
+          <div className="documents-grid">
             {filteredDocuments.map((doc) => {
               const current = doc.current_version;
               return (

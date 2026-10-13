@@ -184,6 +184,8 @@ export const SourceCard: React.FC<SourceCardProps> = ({
                   lineHeight: '1.5',
                   maxHeight: 180,
                   overflowY: 'auto',
+                  overflowWrap: 'anywhere',
+                  wordBreak: 'break-word',
                 }}
               >
                 {additionalContent}

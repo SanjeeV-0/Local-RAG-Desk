@@ -107,3 +107,4 @@ frontend/node_modules/
 frontend/dist/
 .eslintcache
 frontend/.vite/
+.claude

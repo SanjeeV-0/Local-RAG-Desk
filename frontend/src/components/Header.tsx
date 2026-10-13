@@ -76,15 +76,16 @@ export const Header: React.FC<HeaderProps> = ({
               <Terminal size={14} />
               Trace Mode
             </span>
-            <div
+            <button
+              type="button"
               className={`toggle-switch ${traceEnabled ? 'active' : ''}`}
               onClick={() => onToggleTrace(!traceEnabled)}
-              role="button"
-              tabIndex={0}
+              aria-pressed={traceEnabled}
+              aria-label="Toggle Trace Mode"
               title={traceEnabled ? 'Trace Mode ON (includes full retrieval candidates & context)' : 'Trace Mode OFF'}
             >
               <div className="toggle-knob" />
-            </div>
+            </button>
             <span style={{ fontSize: '0.75rem', fontWeight: 600, color: traceEnabled ? '#818cf8' : '#64748b' }}>
               {traceEnabled ? 'ON' : 'OFF'}
             </span>

@@ -77,6 +77,9 @@ export const ResearchPage: React.FC = () => {
           'An unexpected error occurred while communicating with the research agent.'
       );
       setIsBackendHealthy(false);
+      // Clear the previous successful response so it can never be mistaken
+      // for the answer/sources belonging to this failed request.
+      setResponse(null);
     } finally {
       setIsLoading(false);
     }

@@ -1,5 +1,6 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useRef } from 'react';
 import { AlertTriangle, X } from 'lucide-react';
+import { useModalA11y } from '../hooks/useModalA11y';
 
 interface ConfirmModalProps {
   isOpen: boolean;
@@ -28,23 +29,11 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
 }) => {
   const modalRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen && !isLoading) {
-        onCancel();
-      }
-    };
-    if (isOpen) {
-      document.body.style.overflow = 'hidden';
-      window.addEventListener('keydown', handleKeyDown);
-    } else {
-      document.body.style.overflow = '';
-    }
-    return () => {
-      document.body.style.overflow = '';
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [isOpen, isLoading, onCancel]);
+  useModalA11y(modalRef, {
+    isOpen,
+    onClose: onCancel,
+    closeDisabled: isLoading,
+  });
 
   if (!isOpen) return null;
 
