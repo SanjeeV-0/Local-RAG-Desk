@@ -22,6 +22,7 @@ from app.generation.context import ContextAssembler
 from app.observability.langfuse import get_langfuse
 from app.retrieval.models import RetrievedChunk
 from app.retrieval.query_decomposer import QueryDecomposer
+from app.retrieval.query_router import should_decompose
 from app.retrieval.reranker import Reranker
 from app.retrieval.trace import (
     RetrievalTrace,
@@ -41,12 +42,20 @@ class RetrievalService:
         context_assembler: ContextAssembler | None = None,
         query_decomposer: QueryDecomposer | None = None,
         candidate_limit_floor: int = 50,
+        router_enabled: bool = False,
     ) -> None:
         self.repository = repository
         self.embedding_provider = embedding_provider
         self.reranker = reranker
         self.context_assembler = context_assembler or ContextAssembler()
         self.query_decomposer = query_decomposer
+        # Defaults to False, so constructing a RetrievalService without this
+        # argument (every existing call site, including unit tests)
+        # preserves today's exact behavior: decomposition always runs when a
+        # decomposer is configured. Settings-backed via
+        # `Settings.query_router_enabled` in production (see
+        # app.core.dependencies.get_retrieval_service).
+        self.router_enabled = router_enabled
         # Defaults to the existing hard-coded literal (50), so constructing
         # a RetrievalService without this argument (every existing call
         # site, including unit tests) preserves today's exact behavior.
@@ -54,6 +63,11 @@ class RetrievalService:
         # production (see app.core.dependencies.get_retrieval_service).
         self.candidate_limit_floor = candidate_limit_floor
         self.last_trace: RetrievalTrace | None = None
+        # Set on every `search()` call (unlike `last_trace`, which is only
+        # populated when `trace=True`) so the router's decision can be
+        # reported in the Langfuse observation below regardless of the
+        # trace flag.
+        self.last_router_bypassed: bool = False
 
     async def search(
         self,
@@ -114,6 +128,7 @@ class RetrievalService:
                 observation.update(
                     output={
                         "result_count": len(results),
+                        "router_bypassed": self.last_router_bypassed,
                         "results": [
                             {
                                 "chunk_id": str(result.chunk_id),
@@ -157,15 +172,28 @@ class RetrievalService:
         after the fact.
         """
 
+        router_bypassed = False
+
         if self.query_decomposer is None:
             retrieval_queries = (query,)
+        elif self.router_enabled and not should_decompose(query):
+            # The deterministic router decided this query is confidently
+            # single-intent -- skip the QueryDecomposer call (and therefore
+            # the decomposition LLM call) entirely. `retrieval_queries` ends
+            # up identical to what QueryDecomposer would have returned for a
+            # query it did not decompose: `(query,)`.
+            retrieval_queries = (query,)
+            router_bypassed = True
         else:
             # Decomposition always runs here, unconditionally, whenever a
-            # decomposer is configured -- this is the one call site that
-            # decides whether retrieval is single-query or multi-query, and
-            # it has no dependency on `trace` whatsoever.
+            # decomposer is configured and the router is disabled (or did
+            # not bypass) -- this is the one call site that decides whether
+            # retrieval is single-query or multi-query, and it has no
+            # dependency on `trace` whatsoever.
             decomposition = await self.query_decomposer.decompose(query)
             retrieval_queries = decomposition.sub_queries
+
+        self.last_router_bypassed = router_bypassed
 
         merged_candidates: dict[UUID, RetrievedChunk] = {}
 
@@ -236,6 +264,7 @@ class RetrievalService:
                 candidate_limit=candidate_limit,
                 candidates=[self._to_trace_candidate(chunk) for chunk in candidates],
                 final_results=[self._to_trace_candidate(chunk) for chunk in final_results],
+                router_bypassed=router_bypassed,
             )
 
             generation_context = self.context_assembler.assemble(final_results)

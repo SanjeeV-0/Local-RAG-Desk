@@ -331,6 +331,15 @@ class Settings(BaseSettings):
 
         return value
 
+    # When False (the default), RetrievalService always calls
+    # QueryDecomposer for every query, preserving today's exact behavior.
+    # When True, a deterministic, rule-based pre-filter
+    # (app.retrieval.query_router.should_decompose) may skip the
+    # decomposition LLM call for queries it is confident are single-intent.
+    # Ambiguous cases still fall through to decomposition either way -- this
+    # flag only ever removes decomposition calls, never adds them.
+    query_router_enabled: bool = False
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

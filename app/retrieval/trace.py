@@ -54,3 +54,10 @@ class RetrievalTrace:
     sub_queries: list[str] = field(default_factory=list)
     raw_candidate_count: int = 0
     deduplicated_candidate_count: int = 0
+
+    # True when the deterministic query router (app.retrieval.query_router)
+    # decided this query was confidently single-intent and skipped the
+    # QueryDecomposer call entirely. False whenever the router is disabled,
+    # or decomposition ran (whether or not it actually produced more than
+    # one sub-query).
+    router_bypassed: bool = False

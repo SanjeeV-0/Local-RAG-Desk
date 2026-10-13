@@ -3,6 +3,7 @@ from uuid import uuid4
 import pytest
 
 from app.retrieval.models import RetrievedChunk
+from app.retrieval.query_decomposer import QueryDecomposer
 from app.retrieval.service import RetrievalService
 
 
@@ -378,3 +379,135 @@ async def test_decomposed_retrieval_merges_candidates_and_reranks_globally() -> 
     ]
     assert service.last_trace.raw_candidate_count == 4
     assert service.last_trace.deduplicated_candidate_count == 3
+
+
+@pytest.mark.asyncio
+async def test_router_disabled_always_calls_decomposer() -> None:
+    """Regression guard for the default (`router_enabled=False`): behavior
+    must be byte-identical to before the router existed -- the decomposer is
+    always called, even for a query the router would bypass if enabled."""
+
+    chunk = _chunk("only", 0.1)
+    repository = QueryRepository({"a bypassable simple query": [chunk]})
+    decomposer = FakeDecomposer(("a bypassable simple query",))
+
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=QueryEmbeddingProvider(),
+        query_decomposer=decomposer,
+        router_enabled=False,
+    )
+
+    await service.search("a bypassable simple query", limit=1, candidate_limit=5)
+
+    assert decomposer.received_query == "a bypassable simple query"
+    assert service.last_router_bypassed is False
+
+
+@pytest.mark.asyncio
+async def test_router_enabled_bypasses_decomposer_for_simple_query() -> None:
+    chunk = _chunk("only", 0.1)
+    repository = QueryRepository(
+        {"What token budget does chunking target?": [chunk]}
+    )
+    decomposer = FakeDecomposer(("should not be used",))
+
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=QueryEmbeddingProvider(),
+        query_decomposer=decomposer,
+        router_enabled=True,
+    )
+
+    results = await service.search(
+        "What token budget does chunking target?",
+        limit=1,
+        candidate_limit=5,
+    )
+
+    # The decomposition provider was never consulted.
+    assert decomposer.received_query is None
+    assert service.last_router_bypassed is True
+    assert len(results) == 1
+    assert results[0].chunk_id == chunk.chunk_id
+
+
+@pytest.mark.asyncio
+async def test_router_enabled_still_decomposes_complex_query() -> None:
+    first = _chunk("first", 0.2)
+    second = _chunk("second", 0.1)
+
+    repository = QueryRepository(
+        {
+            "query one": [first],
+            "query two": [second],
+        }
+    )
+    decomposer = FakeDecomposer(("query one", "query two"))
+
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=QueryEmbeddingProvider(),
+        query_decomposer=decomposer,
+        router_enabled=True,
+    )
+
+    compound_query = (
+        "What are the main failure modes of query decomposition, and what "
+        "mitigation does the system apply for each one?"
+    )
+
+    await service.search(compound_query, limit=2, candidate_limit=5)
+
+    assert decomposer.received_query == compound_query
+    assert service.last_router_bypassed is False
+    assert repository.calls == ["query one", "query two"]
+
+
+@pytest.mark.asyncio
+async def test_router_bypass_still_reranks_with_original_query() -> None:
+    chunk = _chunk("only", 0.1)
+    simple_query = "How many dimensions does the embedding model output?"
+    repository = QueryRepository({simple_query: [chunk]})
+    reranker = FakeReranker()
+
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=QueryEmbeddingProvider(),
+        reranker=reranker,
+        query_decomposer=FakeDecomposer(("should not be used",)),
+        router_enabled=True,
+    )
+
+    await service.search(simple_query, limit=1, candidate_limit=5)
+
+    assert len(reranker.calls) == 1
+    rerank_query, _ = reranker.calls[0]
+    assert rerank_query == simple_query
+
+
+class _UnreachableProvider:
+    """A QueryDecompositionProvider that fails the test if it is ever
+    called -- used to prove the empty-query ValueError is raised before any
+    provider call, with or without the router enabled."""
+
+    async def decompose(self, query: str) -> list[str]:
+        raise AssertionError("provider.decompose must not be called for an empty query")
+
+
+@pytest.mark.asyncio
+async def test_router_enabled_preserves_empty_query_valueerror() -> None:
+    """The router must never swallow QueryDecomposer's hard failure on an
+    empty/whitespace query -- `should_decompose("")` returns True precisely
+    so this case always falls through to the real decomposer, which raises,
+    regardless of whether the router is enabled."""
+
+    service = RetrievalService(
+        repository=QueryRepository({}),
+        embedding_provider=QueryEmbeddingProvider(),
+        query_decomposer=QueryDecomposer(provider=_UnreachableProvider()),
+        router_enabled=True,
+    )
+
+    with pytest.raises(ValueError, match="query must not be empty"):
+        await service.search("   ", limit=1, candidate_limit=5)
