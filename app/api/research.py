@@ -36,10 +36,17 @@ class ResearchRequest(BaseModel):
     server-side `Settings.trace_enabled` capability ceiling as
     `request.trace AND settings.trace_enabled` (see `ask` below), the same
     rule `POST /retrieval/search` uses. It never affects whether query
-    decomposition or retrieval runs."""
+    decomposition or retrieval runs.
+
+    `router_enabled` is an optional per-request override of the server-side
+    `Settings.query_router_enabled` default (OFF) -- see
+    `app.retrieval.schemas.RetrievalSearchRequest.router_enabled` for the
+    full contract (`None` preserves the configured default; omitting this
+    field is fully backward compatible)."""
 
     query: str = Field(min_length=1)
     trace: bool = False
+    router_enabled: bool | None = None
 
 
 @router.post("/ask")
@@ -80,6 +87,7 @@ async def ask(
             trace_requested=trace_requested,
             effective_trace=effective_trace,
             result_limit=settings.research_ask_result_limit,
+            router_enabled=request.router_enabled,
         )
 
     with langfuse.start_as_current_observation(
@@ -98,6 +106,7 @@ async def ask(
                 trace_requested=trace_requested,
                 effective_trace=effective_trace,
                 result_limit=settings.research_ask_result_limit,
+                router_enabled=request.router_enabled,
             )
 
             observation.update(
@@ -125,6 +134,7 @@ async def _execute_research(
     trace_requested: bool = False,
     effective_trace: bool = False,
     result_limit: int = 10,
+    router_enabled: bool | None = None,
 ) -> dict[str, object]:
     """Execute retrieval, context assembly, and generation.
 
@@ -132,12 +142,18 @@ async def _execute_research(
     any direct call that omits it (e.g. existing tests) preserves today's
     exact behavior -- the production route always passes
     `Settings.research_ask_result_limit` explicitly.
+
+    `router_enabled` defaults to `None` (use `RetrievalService`'s configured
+    default), so any direct call that omits it preserves today's exact
+    behavior -- the production route always passes `request.router_enabled`
+    explicitly.
     """
 
     results = await retrieval_service.search(
         query=query,
         limit=result_limit,
         trace=effective_trace,
+        router_enabled=router_enabled,
     )
 
     context = ContextAssembler().assemble(results)
@@ -225,6 +241,7 @@ async def _execute_research(
                 if retrieval_service.last_trace.context is not None
                 else None
             ),
+            "router_bypassed": retrieval_service.last_trace.router_bypassed,
         }
 
     return response

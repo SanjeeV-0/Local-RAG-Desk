@@ -81,6 +81,7 @@ async def search(
         document_id=request.document_id,
         section_id=request.section_id,
         trace=effective_trace,
+        router_enabled=request.router_enabled,
     )
 
     trace_response = None
@@ -106,6 +107,7 @@ async def search(
             candidates=[_trace_candidate_response(candidate) for candidate in trace.candidates],
             final_results=[_trace_candidate_response(result) for result in trace.final_results],
             context=context_response,
+            router_bypassed=trace.router_bypassed,
         )
 
     trace_unavailable_reason = (

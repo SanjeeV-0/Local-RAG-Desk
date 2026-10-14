@@ -12,6 +12,14 @@ class RetrievalSearchRequest(BaseModel):
     `request.trace AND settings.trace_enabled` (see `app.api.retrieval`).
     Neither this flag nor the server setting ever affects whether query
     decomposition or retrieval itself runs; tracing is observability only.
+
+    `router_enabled` is an optional per-request override of the server-side
+    `Settings.query_router_enabled` default (OFF). `None` (the default, and
+    what every existing caller that omits this field gets) means "use the
+    configured application default" -- omitting it is fully backward
+    compatible. `True`/`False` controls the deterministic query router for
+    THIS request only; it never mutates the application-wide setting and
+    has no effect on any other request.
     """
 
     query: str = Field(min_length=1)
@@ -19,6 +27,7 @@ class RetrievalSearchRequest(BaseModel):
     document_id: UUID | None = None
     section_id: UUID | None = None
     trace: bool = False
+    router_enabled: bool | None = None
 
 
 class RetrievedChunkResponse(BaseModel):
@@ -66,7 +75,17 @@ class RetrievalTraceContextResponse(BaseModel):
 
 
 class RetrievalTraceResponse(BaseModel):
-    """Debug trace for a retrieval operation."""
+    """Debug trace for a retrieval operation.
+
+    `router_bypassed` is `True` exactly when the deterministic query router
+    was enabled (via the server default or this request's `router_enabled`
+    override) AND it actually decided to skip the decomposition call for
+    `original_query`. It is `False` whenever the router was disabled, or
+    enabled but decomposition still ran (including when the router merely
+    found nothing to bypass). This reflects the actual executed decision
+    (`RetrievalService.last_router_bypassed`/`RetrievalTrace.router_bypassed`)
+    -- it is never inferred from `sub_queries` length or query text.
+    """
 
     query: str
     original_query: str
@@ -77,6 +96,7 @@ class RetrievalTraceResponse(BaseModel):
     candidates: list[RetrievalTraceCandidateResponse]
     final_results: list[RetrievalTraceCandidateResponse]
     context: RetrievalTraceContextResponse | None = None
+    router_bypassed: bool
 
 
 class RetrievalSearchResponse(BaseModel):

@@ -1,3 +1,4 @@
+import asyncio
 from uuid import uuid4
 
 import pytest
@@ -511,3 +512,154 @@ async def test_router_enabled_preserves_empty_query_valueerror() -> None:
 
     with pytest.raises(ValueError, match="query must not be empty"):
         await service.search("   ", limit=1, candidate_limit=5)
+
+
+SIMPLE_QUERY = "What distance operators does pgvector provide for comparing vectors?"
+COMPLEX_QUERY = (
+    "What are the main failure modes of query decomposition, and what "
+    "mitigation does the system apply for each one?"
+)
+
+
+@pytest.mark.asyncio
+async def test_per_call_router_enabled_true_overrides_instance_default_false() -> None:
+    """A per-call `router_enabled=True` must bypass decomposition for a
+    simple query even though the service instance itself was constructed
+    with the application default (`router_enabled=False`)."""
+
+    chunk = _chunk("only", 0.1)
+    repository = QueryRepository({SIMPLE_QUERY: [chunk]})
+    decomposer = FakeDecomposer(("should not be used",))
+
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=QueryEmbeddingProvider(),
+        query_decomposer=decomposer,
+        router_enabled=False,
+    )
+
+    await service.search(SIMPLE_QUERY, limit=1, candidate_limit=5, router_enabled=True)
+
+    assert decomposer.received_query is None
+    assert service.last_router_bypassed is True
+
+
+@pytest.mark.asyncio
+async def test_per_call_router_enabled_false_overrides_instance_default_true() -> None:
+    """A per-call `router_enabled=False` must force decomposition to run
+    even though the service instance itself was constructed with the
+    router enabled."""
+
+    chunk = _chunk("only", 0.1)
+    repository = QueryRepository({SIMPLE_QUERY: [chunk]})
+    decomposer = FakeDecomposer((SIMPLE_QUERY,))
+
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=QueryEmbeddingProvider(),
+        query_decomposer=decomposer,
+        router_enabled=True,
+    )
+
+    await service.search(SIMPLE_QUERY, limit=1, candidate_limit=5, router_enabled=False)
+
+    assert decomposer.received_query == SIMPLE_QUERY
+    assert service.last_router_bypassed is False
+
+
+@pytest.mark.asyncio
+async def test_per_call_router_enabled_none_falls_back_to_instance_default() -> None:
+    """Omitting the per-call override (the default, `None`) must preserve
+    whatever the service instance was constructed with -- this is the
+    exact case every existing call site (including every other test in
+    this file) already relies on."""
+
+    chunk = _chunk("only", 0.1)
+    repository = QueryRepository({SIMPLE_QUERY: [chunk]})
+    decomposer = FakeDecomposer(("should not be used",))
+
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=QueryEmbeddingProvider(),
+        query_decomposer=decomposer,
+        router_enabled=True,
+    )
+
+    # No `router_enabled` kwarg passed at all.
+    await service.search(SIMPLE_QUERY, limit=1, candidate_limit=5)
+
+    assert decomposer.received_query is None
+    assert service.last_router_bypassed is True
+
+
+@pytest.mark.asyncio
+async def test_per_call_router_override_still_decomposes_a_complex_query() -> None:
+    """A per-call override to `True` must still decompose a query the
+    deterministic router itself classifies as needing it -- the override
+    only changes whether the router runs at all, never its rules."""
+
+    first = _chunk("first", 0.2)
+    second = _chunk("second", 0.1)
+    repository = QueryRepository({"query one": [first], "query two": [second]})
+    decomposer = FakeDecomposer(("query one", "query two"))
+
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=QueryEmbeddingProvider(),
+        query_decomposer=decomposer,
+        router_enabled=False,
+    )
+
+    await service.search(COMPLEX_QUERY, limit=2, candidate_limit=5, router_enabled=True)
+
+    assert decomposer.received_query == COMPLEX_QUERY
+    assert service.last_router_bypassed is False
+    assert repository.calls == ["query one", "query two"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_calls_with_opposite_router_overrides_do_not_leak() -> None:
+    """Two concurrent `search()` calls on the SAME service instance, with
+    opposite per-call router overrides, must not influence each other --
+    `router_enabled` is a local variable threaded through `_search`, never
+    an assignment to `self.router_enabled` or any other shared state."""
+
+    chunk_simple = _chunk("simple-result", 0.1)
+    chunk_complex_a = _chunk("complex-a", 0.2)
+    chunk_complex_b = _chunk("complex-b", 0.15)
+
+    repository = QueryRepository(
+        {
+            SIMPLE_QUERY: [chunk_simple],
+            "query one": [chunk_complex_a],
+            "query two": [chunk_complex_b],
+        }
+    )
+    decomposer = FakeDecomposer(("query one", "query two"))
+
+    # Constructed with the application default OFF, matching production's
+    # actual default -- both calls below rely entirely on their own
+    # per-call override, not on the instance's own setting.
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=QueryEmbeddingProvider(),
+        query_decomposer=decomposer,
+        router_enabled=False,
+    )
+
+    bypass_call = service.search(SIMPLE_QUERY, limit=1, candidate_limit=5, router_enabled=True)
+    decompose_call = service.search(
+        COMPLEX_QUERY, limit=2, candidate_limit=5, router_enabled=False
+    )
+
+    bypass_results, decompose_results = await asyncio.gather(bypass_call, decompose_call)
+
+    # The simple-query call bypassed decomposition entirely...
+    assert [r.chunk_id for r in bypass_results] == [chunk_simple.chunk_id]
+    # ...while the complex-query call still decomposed, regardless of
+    # interleaving -- neither call's override leaked into the other's
+    # execution or into the shared `decomposer`/`repository` fakes.
+    assert {r.chunk_id for r in decompose_results} == {
+        chunk_complex_a.chunk_id,
+        chunk_complex_b.chunk_id,
+    }

@@ -35,13 +35,20 @@ from app.retrieval.trace import (
 class FakeRetrievalService:
     """Fake retrieval service for API contract tests."""
 
-    def __init__(self, headingless: bool = False) -> None:
+    def __init__(self, headingless: bool = False, router_bypassed: bool = False) -> None:
         self.last_trace = None
         # A headingless document's chunks have section_id (and therefore
         # section_path) as NULL -- the outer-join retrieval fix keeps them
         # retrievable rather than excluding them. `headingless=True` models
         # exactly that shape so tests can exercise it without a real database.
         self.headingless = headingless
+        # What the (faked) retrieval execution decided the router did --
+        # independent of `received_router_enabled` below, which is what the
+        # endpoint asked for.
+        self.router_bypassed = router_bypassed
+        # Captures whatever the endpoint actually passed, so tests can
+        # assert the per-request router override reached this far.
+        self.received_router_enabled: bool | None = None
 
     async def search(
         self,
@@ -52,8 +59,11 @@ class FakeRetrievalService:
         section_id=None,
         candidate_limit=None,
         trace: bool = False,
+        router_enabled: bool | None = None,
     ) -> list[RetrievedChunk]:
         """Return deterministic retrieval results."""
+
+        self.received_router_enabled = router_enabled
 
         result = RetrievedChunk(
             document_id=uuid4(),
@@ -97,6 +107,7 @@ class FakeRetrievalService:
                     ),
                     sources=[candidate],
                 ),
+                router_bypassed=self.router_bypassed,
             )
         else:
             self.last_trace = None
@@ -946,6 +957,138 @@ def test_research_ask_trace_mode() -> None:
         assert context_source["page_numbers"] == [1, 2]
         assert context_source["distance"] == 0.15
         assert context_source["rerank_score"] == 4.2
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize("router_enabled", [True, False, None])
+def test_retrieval_search_accepts_router_enabled_field(router_enabled) -> None:
+    """`router_enabled` is accepted whether explicitly True, explicitly
+    False, or omitted from the payload entirely (modeled here as `None`,
+    which is excluded from the JSON body below) -- all three must validate
+    and reach `RetrievalService.search` as the exact value sent."""
+
+    retrieval_service = FakeRetrievalService()
+    app.dependency_overrides[get_retrieval_service] = lambda: retrieval_service
+
+    client = TestClient(app)
+
+    payload = {"query": "retrieval augmented generation", "limit": 2}
+    if router_enabled is not None:
+        payload["router_enabled"] = router_enabled
+
+    try:
+        response = client.post("/retrieval/search", json=payload)
+
+        assert response.status_code == 200
+        assert retrieval_service.received_router_enabled == router_enabled
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_retrieval_search_router_override_takes_precedence_over_setting() -> None:
+    """An explicit per-request `router_enabled=True` must reach
+    `RetrievalService.search` as `True` regardless of what the application
+    setting (`Settings.query_router_enabled`, default False) currently is --
+    confirming the override, not the global default, is what's threaded
+    through for this request."""
+
+    retrieval_service = FakeRetrievalService()
+    app.dependency_overrides[get_retrieval_service] = lambda: retrieval_service
+    # Application default stays OFF -- only the request overrides it.
+    app.dependency_overrides[get_app_settings] = lambda: Settings(query_router_enabled=False)
+
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/retrieval/search",
+            json={"query": "retrieval augmented generation", "router_enabled": True},
+        )
+
+        assert response.status_code == 200
+        assert retrieval_service.received_router_enabled is True
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_retrieval_search_omitted_router_enabled_is_none_not_false() -> None:
+    """Existing request payloads that predate this field must remain
+    compatible -- omitting `router_enabled` must reach `RetrievalService`
+    as `None` (defer to the service's own configured default), never
+    coerced to `False` (which would force-disable an application default
+    of `True` instead of deferring to it)."""
+
+    retrieval_service = FakeRetrievalService()
+    app.dependency_overrides[get_retrieval_service] = lambda: retrieval_service
+
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/retrieval/search",
+            json={"query": "retrieval augmented generation"},
+        )
+
+        assert response.status_code == 200
+        assert retrieval_service.received_router_enabled is None
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_retrieval_search_trace_reports_router_bypassed_true() -> None:
+    """`router_bypassed` in the trace response must reflect the actual
+    executed decision (here, faked as True), not be inferred from
+    `sub_queries` or query text."""
+
+    app.dependency_overrides[get_retrieval_service] = lambda: FakeRetrievalService(
+        router_bypassed=True
+    )
+    app.dependency_overrides[get_app_settings] = lambda: Settings(trace_enabled=True)
+
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/retrieval/search",
+            json={"query": "research query", "limit": 1, "trace": True, "router_enabled": True},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["trace"] is not None
+        assert body["trace"]["router_bypassed"] is True
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_retrieval_search_trace_reports_router_bypassed_false() -> None:
+    """`router_bypassed` must be False in the trace response when
+    decomposition ran (or the router was disabled) -- the default shape of
+    `FakeRetrievalService` here."""
+
+    app.dependency_overrides[get_retrieval_service] = lambda: FakeRetrievalService(
+        router_bypassed=False
+    )
+    app.dependency_overrides[get_app_settings] = lambda: Settings(trace_enabled=True)
+
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/retrieval/search",
+            json={"query": "research query", "limit": 1, "trace": True},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["trace"] is not None
+        assert body["trace"]["router_bypassed"] is False
 
     finally:
         app.dependency_overrides.clear()

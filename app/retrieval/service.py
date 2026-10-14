@@ -78,8 +78,19 @@ class RetrievalService:
         section_id: UUID | None = None,
         candidate_limit: int | None = None,
         trace: bool = False,
+        router_enabled: bool | None = None,
     ) -> list[RetrievedChunk]:
-        """Retrieve and optionally rerank document chunks."""
+        """Retrieve and optionally rerank document chunks.
+
+        `router_enabled` is an optional PER-CALL override of `self.router_enabled`
+        (itself resolved once, at construction time, from `Settings.query_router_enabled`
+        -- see `app.core.dependencies.get_retrieval_service`). `None` (the default)
+        means "use whatever this service instance was constructed with"; `True`/`False`
+        overrides it for this call only. This is a plain local value threaded through
+        to `_search` -- it never mutates `self.router_enabled` or any other shared
+        state, so concurrent calls on the same (or different) `RetrievalService`
+        instances with different overrides cannot affect one another.
+        """
 
         self.last_trace = None
 
@@ -100,6 +111,7 @@ class RetrievalService:
                 section_id=section_id,
                 candidate_limit=candidate_limit,
                 trace=trace,
+                router_enabled=router_enabled,
             )
 
         with langfuse.start_as_current_observation(
@@ -123,6 +135,7 @@ class RetrievalService:
                     section_id=section_id,
                     candidate_limit=candidate_limit,
                     trace=trace,
+                    router_enabled=router_enabled,
                 )
 
                 observation.update(
@@ -162,6 +175,7 @@ class RetrievalService:
         section_id: UUID | None,
         candidate_limit: int,
         trace: bool,
+        router_enabled: bool | None = None,
     ) -> list[RetrievedChunk]:
         """Execute retrieval without observability concerns.
 
@@ -172,11 +186,22 @@ class RetrievalService:
         after the fact.
         """
 
+        # Per-call override (`None` falls back to the instance default set at
+        # construction time). A plain local variable, not an assignment to
+        # `self.router_enabled` -- nothing here is shared across calls or
+        # mutated, so concurrent requests (even sharing a `RetrievalService`
+        # instance, which they don't in production -- see
+        # `app.core.dependencies.get_retrieval_service`) can never observe or
+        # influence each other's effective router setting.
+        effective_router_enabled = (
+            self.router_enabled if router_enabled is None else router_enabled
+        )
+
         router_bypassed = False
 
         if self.query_decomposer is None:
             retrieval_queries = (query,)
-        elif self.router_enabled and not should_decompose(query):
+        elif effective_router_enabled and not should_decompose(query):
             # The deterministic router decided this query is confidently
             # single-intent -- skip the QueryDecomposer call (and therefore
             # the decomposition LLM call) entirely. `retrieval_queries` ends
