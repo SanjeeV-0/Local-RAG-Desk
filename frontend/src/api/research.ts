@@ -38,15 +38,27 @@ async function handleResponse<T>(response: Response): Promise<T> {
 }
 
 /**
- * Sends a research question request to backend POST /research/ask
+ * Sends a research question request to backend POST /research/ask.
+ *
+ * `routerEnabled` is sent as the request's explicit `router_enabled` --
+ * the frontend's Query Router toggle is binary (no "inherit the server
+ * default" UI state), so it is always a concrete boolean here, never
+ * omitted/null. `signal`, when provided, lets the caller abort the
+ * in-flight fetch (e.g. a Cancel button or a superseding new request) --
+ * an aborted fetch rejects with a `DOMException` named `"AbortError"`,
+ * which is deliberately NOT rewritten below so callers can distinguish a
+ * user-initiated cancellation from a real network/backend failure.
  */
 export async function askResearchQuestion(
   query: string,
-  trace: boolean = false
+  trace: boolean = false,
+  routerEnabled: boolean = false,
+  signal?: AbortSignal
 ): Promise<ResearchResponse> {
   const payload: ResearchRequest = {
     query: query.trim(),
     trace,
+    router_enabled: routerEnabled,
   };
 
   try {
@@ -57,10 +69,14 @@ export async function askResearchQuestion(
         'Accept': 'application/json',
       },
       body: JSON.stringify(payload),
+      signal,
     });
 
     return await handleResponse<ResearchResponse>(response);
   } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      throw error;
+    }
     if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
       throw new Error(
         'Unable to connect to the research agent backend. Please ensure the FastAPI server is running on http://localhost:8000.'
@@ -79,12 +95,18 @@ export async function askResearchQuestion(
  * backend still applies its own `TRACE_ENABLED` ceiling on top of this.
  */
 export async function searchRetrievedChunks(
-  params: RetrievalSearchRequest
+  params: RetrievalSearchRequest,
+  signal?: AbortSignal
 ): Promise<RetrievalSearchResponse> {
   const payload: Record<string, unknown> = {
     query: params.query.trim(),
     limit: params.limit ?? 10,
     trace: params.trace ?? false,
+    // Same explicit-boolean contract as `askResearchQuestion` -- the
+    // Retrieval Explorer's Query Router toggle always sends a concrete
+    // boolean, defaulting to false (not sent at all) only if the caller
+    // genuinely omits it.
+    router_enabled: params.router_enabled ?? false,
   };
 
   if (params.document_id) {
@@ -102,10 +124,14 @@ export async function searchRetrievedChunks(
         'Accept': 'application/json',
       },
       body: JSON.stringify(payload),
+      signal,
     });
 
     return await handleResponse<RetrievalSearchResponse>(response);
   } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      throw error;
+    }
     if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
       throw new Error(
         'Unable to connect to the retrieval service. Please verify the backend is running.'

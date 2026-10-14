@@ -1,10 +1,13 @@
 import React, { useState, KeyboardEvent } from 'react';
-import { Search, Sparkles, Send } from 'lucide-react';
+import { Search, Sparkles, Send, X } from 'lucide-react';
 
 interface ResearchInputProps {
   onSearch: (query: string) => void;
   isLoading: boolean;
   initialQuery?: string;
+  // Shown only while `isLoading` is true. Aborts the in-flight request --
+  // see ResearchPage's use of useCancellableRequest.
+  onCancel?: () => void;
 }
 
 const SAMPLE_QUERIES = [
@@ -17,6 +20,7 @@ export const ResearchInput: React.FC<ResearchInputProps> = ({
   onSearch,
   isLoading,
   initialQuery = '',
+  onCancel,
 }) => {
   const [query, setQuery] = useState(initialQuery);
 
@@ -82,23 +86,35 @@ export const ResearchInput: React.FC<ResearchInputProps> = ({
             ))}
           </div>
 
-          <button
-            type="submit"
-            className="btn-primary"
-            disabled={!query.trim() || isLoading}
-          >
-            {isLoading ? (
-              <>
-                <span className="spinner-ring" style={{ width: 16, height: 16, borderWidth: 2 }} />
-                Researching...
-              </>
-            ) : (
-              <>
-                <Send size={16} />
-                Research
-              </>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+            {isLoading && onCancel && (
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={onCancel}
+              >
+                <X size={14} />
+                Cancel
+              </button>
             )}
-          </button>
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={!query.trim() || isLoading}
+            >
+              {isLoading ? (
+                <>
+                  <span className="spinner-ring" style={{ width: 16, height: 16, borderWidth: 2 }} />
+                  Researching...
+                </>
+              ) : (
+                <>
+                  <Send size={16} />
+                  Research
+                </>
+              )}
+            </button>
+          </div>
         </div>
       </form>
     </div>

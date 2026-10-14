@@ -1,5 +1,5 @@
 import React from 'react';
-import { Cpu, Terminal, Activity, Database, Sparkles, BookOpen, Layers } from 'lucide-react';
+import { Cpu, Terminal, Activity, Database, Sparkles, BookOpen, Layers, GitBranch } from 'lucide-react';
 import { BackendReadinessResponse } from '../types/research';
 
 export type WorkspaceTab = 'research' | 'retrieval' | 'documents' | 'trace';
@@ -9,6 +9,14 @@ interface HeaderProps {
   onSelectTab: (tab: WorkspaceTab) => void;
   traceEnabled: boolean;
   onToggleTrace: (enabled: boolean) => void;
+  // Global Query Router toggle -- a per-request override sent explicitly
+  // as `router_enabled` on every /research/ask and /retrieval/search call
+  // (see app/retrieval/schemas.py). Mutating this never changes any
+  // server-side setting; it only changes what THIS browser sends on its
+  // next request. Defaults to OFF (owned by ResearchPage), matching the
+  // server's own default.
+  routerEnabled: boolean;
+  onToggleRouter: (enabled: boolean) => void;
   isBackendHealthy: boolean | null;
   readinessInfo: BackendReadinessResponse | null;
   hasTraceData: boolean;
@@ -19,6 +27,8 @@ export const Header: React.FC<HeaderProps> = ({
   onSelectTab,
   traceEnabled,
   onToggleTrace,
+  routerEnabled,
+  onToggleRouter,
   isBackendHealthy,
   readinessInfo,
   hasTraceData,
@@ -68,6 +78,31 @@ export const Header: React.FC<HeaderProps> = ({
               : isDbReady
               ? 'pgvector Ready'
               : 'DB Disconnected'}
+          </div>
+
+          {/* Query Router toggle */}
+          <div className="trace-toggle-box">
+            <span className="trace-toggle-label">
+              <GitBranch size={14} />
+              Query Router
+            </span>
+            <button
+              type="button"
+              className={`toggle-switch ${routerEnabled ? 'active' : ''}`}
+              onClick={() => onToggleRouter(!routerEnabled)}
+              aria-pressed={routerEnabled}
+              aria-label="Toggle Query Router"
+              title={
+                routerEnabled
+                  ? 'Query Router ON: simple, single-intent queries may bypass decomposition.'
+                  : 'Query Router OFF: every request always runs full query decomposition (existing behavior).'
+              }
+            >
+              <div className="toggle-knob" />
+            </button>
+            <span style={{ fontSize: '0.75rem', fontWeight: 600, color: routerEnabled ? '#818cf8' : '#64748b' }}>
+              {routerEnabled ? 'ON' : 'OFF'}
+            </span>
           </div>
 
           {/* Trace toggle switch */}

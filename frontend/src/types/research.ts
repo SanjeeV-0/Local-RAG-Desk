@@ -8,6 +8,13 @@
 export interface ResearchRequest {
   query: string;
   trace?: boolean;
+  // Per-request override of the server's `query_router_enabled` default.
+  // `null`/omitted means "use the configured application default"; `true`/
+  // `false` controls the deterministic query router for THIS request only
+  // (see app/retrieval/schemas.py's `RetrievalSearchRequest.router_enabled`
+  // -- both endpoints share the identical contract). The frontend's Query
+  // Router toggle always sends an explicit `true`/`false`, never `null`.
+  router_enabled?: boolean | null;
 }
 
 export interface Source {
@@ -67,6 +74,17 @@ export interface TraceData {
   candidates: CandidateResult[];
   final_results: CandidateResult[];
   context: TraceContext | null;
+  // True exactly when the deterministic query router was enabled for this
+  // request AND actually decided to skip the decomposition call for
+  // `original_query`; False whenever the router was disabled, or enabled
+  // but decomposition still ran anyway (including when it ran and decided
+  // a single sub-query -- i.e. `sub_queries.length === 1` does NOT by
+  // itself mean the router bypassed anything). Reflects the backend's
+  // actual executed decision (RetrievalTraceResponse.router_bypassed /
+  // the research trace dict's "router_bypassed" key) -- never inferred
+  // here from sub_queries length or query text. The decomposer, not the
+  // router, is what produces `sub_queries` whenever decomposition runs.
+  router_bypassed: boolean;
 }
 
 /**
@@ -101,6 +119,9 @@ export interface RetrievalSearchRequest {
   // TRACE_ENABLED setting as request.trace AND settings.trace_enabled --
   // see `RetrievalSearchResponse` for how the server reports the outcome.
   trace?: boolean;
+  // See `ResearchRequest.router_enabled` -- identical per-request override
+  // contract, shared by both endpoints.
+  router_enabled?: boolean | null;
 }
 
 export interface RetrievedChunkResponse {

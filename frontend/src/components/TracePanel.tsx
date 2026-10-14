@@ -56,10 +56,45 @@ export const TracePanel: React.FC<TracePanelProps> = ({ trace }) => {
           Original query: <span style={{ color: '#e2e8f0', fontWeight: 500 }}>"{trace.original_query}"</span>
         </div>
 
-        {trace.sub_queries.length > 1 ? (
+        {/* The router only ever decides WHETHER the decomposer runs; it
+            never generates sub-queries itself. These three states are
+            mutually exclusive and derived only from the trace's own
+            `router_bypassed`/`sub_queries` fields -- never inferred from
+            query text or length. */}
+        <div
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '0.35rem',
+            fontSize: '0.72rem',
+            fontWeight: 600,
+            padding: '0.2rem 0.6rem',
+            borderRadius: 9999,
+            marginBottom: '0.75rem',
+            color: trace.router_bypassed ? '#34d399' : '#94a3b8',
+            background: trace.router_bypassed
+              ? 'rgba(16, 185, 129, 0.12)'
+              : 'rgba(148, 163, 184, 0.1)',
+            border: `1px solid ${trace.router_bypassed ? 'rgba(16, 185, 129, 0.3)' : 'rgba(148, 163, 184, 0.2)'}`,
+          }}
+        >
+          <GitBranch size={11} />
+          {trace.router_bypassed
+            ? 'Query Router: bypassed decomposition (single-intent query)'
+            : 'Query Router: allowed decomposition'}
+        </div>
+
+        {trace.router_bypassed ? (
+          <div style={{ fontSize: '0.78rem', color: '#64748b' }}>
+            The router determined this query was confidently single-intent and skipped
+            the decomposer entirely -- the original query above was used directly for
+            retrieval.
+          </div>
+        ) : trace.sub_queries.length > 1 ? (
           <>
             <div style={{ fontSize: '0.78rem', color: '#94a3b8', marginBottom: '0.5rem' }}>
-              Decomposed into {trace.sub_queries.length} retrieval sub-queries, each run independently and merged into one candidate pool:
+              The decomposer split this query into {trace.sub_queries.length} retrieval
+              sub-queries, each run independently and merged into one candidate pool:
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
               {trace.sub_queries.map((subQuery, idx) => (
@@ -81,7 +116,8 @@ export const TracePanel: React.FC<TracePanelProps> = ({ trace }) => {
           </>
         ) : (
           <div style={{ fontSize: '0.78rem', color: '#64748b' }}>
-            No decomposition occurred -- a single information need was detected, so retrieval ran against the original query only.
+            The decomposer ran (the router did not bypass it) and determined a single
+            information need, so retrieval ran against the original query only.
           </div>
         )}
       </div>

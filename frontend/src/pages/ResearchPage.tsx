@@ -17,6 +17,7 @@ import { DownloadButton } from '../components/DownloadButton';
 import { LoadingOverlay } from '../components/LoadingOverlay';
 import { RetrievalWorkspace } from '../components/RetrievalWorkspace';
 import { DocumentWorkspace } from '../components/DocumentWorkspace';
+import { useCancellableRequest } from '../hooks/useCancellableRequest';
 import {
   askResearchQuestion,
   checkBackendHealth,
@@ -27,18 +28,27 @@ import {
   BackendReadinessResponse,
   TraceData,
 } from '../types/research';
-import { AlertTriangle, RefreshCw } from 'lucide-react';
+import { AlertTriangle, RefreshCw, XCircle } from 'lucide-react';
 
 export const ResearchPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('research');
   const [traceEnabled, setTraceEnabled] = useState<boolean>(false);
+  // Global Query Router toggle -- a per-request override, defaults OFF to
+  // match the server's own default (`Settings.query_router_enabled`).
+  // Deliberately not persisted across reloads: no existing preference
+  // mechanism exists in this app (Trace Mode isn't persisted either), and
+  // the task calls for a fresh default each load unless one already did.
+  const [routerEnabled, setRouterEnabled] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [response, setResponse] = useState<ResearchResponse | null>(null);
   const [activeTraceData, setActiveTraceData] = useState<TraceData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isCancelled, setIsCancelled] = useState<boolean>(false);
   const [isBackendHealthy, setIsBackendHealthy] = useState<boolean | null>(null);
   const [readinessInfo, setReadinessInfo] = useState<BackendReadinessResponse | null>(null);
   const [lastQuery, setLastQuery] = useState<string>('');
+
+  const researchRequest = useCancellableRequest();
 
   // Target document selected for inspection
   const [targetDocId, setTargetDocId] = useState<string | null>(null);
@@ -58,12 +68,22 @@ export const ResearchPage: React.FC = () => {
   }, []);
 
   const handleResearch = async (query: string) => {
+    const { signal, isCurrent } = researchRequest.start();
+
     setIsLoading(true);
     setError(null);
+    setIsCancelled(false);
     setLastQuery(query);
 
     try {
-      const data = await askResearchQuestion(query, traceEnabled);
+      const data = await askResearchQuestion(query, traceEnabled, routerEnabled, signal);
+
+      // A newer request may have already superseded this one (the user
+      // submitted again, or cancelled-and-resubmitted) -- if so, this
+      // result is stale and must never overwrite what the newer request
+      // already established.
+      if (!isCurrent()) return;
+
       setResponse(data);
       setIsBackendHealthy(true);
 
@@ -71,6 +91,23 @@ export const ResearchPage: React.FC = () => {
         setActiveTraceData(data.trace);
       }
     } catch (err: any) {
+      // Superseded by a newer request -- that request owns the UI now;
+      // this one has nothing left to say, whether it failed or was
+      // itself aborted as a side effect of being superseded.
+      if (!isCurrent()) return;
+
+      if (err?.name === 'AbortError') {
+        // A genuine user-initiated cancellation of what is still the
+        // current request (the branch above already filtered out the
+        // "aborted because superseded" case). This is NOT a backend/
+        // network failure -- do not show the generic error banner, and
+        // do not claim the backend actually stopped processing; the
+        // fetch was simply abandoned client-side.
+        setIsCancelled(true);
+        setResponse(null);
+        return;
+      }
+
       console.error('Research request failed:', err);
       setError(
         err?.message ||
@@ -81,8 +118,14 @@ export const ResearchPage: React.FC = () => {
       // for the answer/sources belonging to this failed request.
       setResponse(null);
     } finally {
-      setIsLoading(false);
+      // A superseded request's `finally` must never clear the newer
+      // request's loading state.
+      if (isCurrent()) setIsLoading(false);
     }
+  };
+
+  const handleCancelResearch = () => {
+    researchRequest.cancel();
   };
 
   const handleRetry = () => {
@@ -108,6 +151,8 @@ export const ResearchPage: React.FC = () => {
         onSelectTab={setActiveTab}
         traceEnabled={traceEnabled}
         onToggleTrace={setTraceEnabled}
+        routerEnabled={routerEnabled}
+        onToggleRouter={setRouterEnabled}
         isBackendHealthy={isBackendHealthy}
         readinessInfo={readinessInfo}
         hasTraceData={!!(activeTraceData || response?.trace)}
@@ -121,7 +166,22 @@ export const ResearchPage: React.FC = () => {
               onSearch={handleResearch}
               isLoading={isLoading}
               initialQuery={lastQuery}
+              onCancel={handleCancelResearch}
             />
+
+            {isCancelled && (
+              <div className="warning-banner">
+                <XCircle size={22} style={{ flexShrink: 0, marginTop: 2 }} />
+                <div>
+                  <div className="warning-title">Request Cancelled</div>
+                  <div className="warning-desc">
+                    The request was cancelled before a response was received. This only
+                    stops the browser from waiting on or using the response -- it does
+                    not guarantee any in-progress backend processing was halted.
+                  </div>
+                </div>
+              </div>
+            )}
 
             {error && (
               <div className="error-banner">
@@ -182,6 +242,7 @@ export const ResearchPage: React.FC = () => {
             initialDocumentId={targetDocId}
             onSelectDocument={handleNavigateToDoc}
             traceEnabled={traceEnabled}
+            routerEnabled={routerEnabled}
             onViewTrace={(trace) => {
               setActiveTraceData(trace);
               setActiveTab('trace');

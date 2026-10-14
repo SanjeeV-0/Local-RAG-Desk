@@ -20,6 +20,7 @@ import {
   TraceData,
 } from '../types/research';
 import { searchRetrievedChunks } from '../api/research';
+import { useCancellableRequest } from '../hooks/useCancellableRequest';
 import {
   Search,
   Layers,
@@ -35,6 +36,8 @@ import {
   Cpu,
   GitBranch,
   Terminal,
+  X,
+  XCircle,
 } from 'lucide-react';
 
 interface RetrievalWorkspaceProps {
@@ -46,6 +49,10 @@ interface RetrievalWorkspaceProps {
   // there is no separate, locally-duplicated toggle here, so the UI state
   // and the request payload can never drift apart.
   traceEnabled: boolean;
+  // The header's global Query Router toggle -- same single-source-of-truth
+  // rationale as `traceEnabled`, sent explicitly as `router_enabled` on
+  // every request.
+  routerEnabled: boolean;
 }
 
 export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
@@ -53,6 +60,7 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
   onSelectDocument,
   onViewTrace,
   traceEnabled,
+  routerEnabled,
 }) => {
   const [query, setQuery] = useState('');
   const [limit, setLimit] = useState(10);
@@ -62,21 +70,28 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
 
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isCancelled, setIsCancelled] = useState(false);
   const [response, setResponse] = useState<RetrievalSearchResponse | null>(null);
   const [expandedChunkId, setExpandedChunkId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const retrievalRequest = useCancellableRequest();
 
   const handleSearch = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!query.trim() || isLoading) return;
 
+    const { signal, isCurrent } = retrievalRequest.start();
+
     setIsLoading(true);
     setError(null);
+    setIsCancelled(false);
 
     const payload: RetrievalSearchRequest = {
       query: query.trim(),
       limit,
       trace: traceEnabled,
+      router_enabled: routerEnabled,
     };
     if (documentIdFilter.trim()) {
       payload.document_id = documentIdFilter.trim();
@@ -86,21 +101,41 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
     }
 
     try {
-      const data = await searchRetrievedChunks(payload);
+      const data = await searchRetrievedChunks(payload, signal);
+
+      // Superseded by a newer request -- never overwrite its state.
+      if (!isCurrent()) return;
+
       setResponse(data);
 
       if (data.trace_available && data.trace && onViewTrace) {
         onViewTrace(data.trace);
       }
     } catch (err: any) {
+      if (!isCurrent()) return;
+
+      if (err?.name === 'AbortError') {
+        // Genuine user cancellation of the still-current request -- not a
+        // backend/network failure, so no generic error banner. Aborting
+        // the fetch only stops the browser from waiting on the response;
+        // it does not guarantee the backend stopped processing.
+        setIsCancelled(true);
+        setResponse(null);
+        return;
+      }
+
       setError(err?.message || 'Failed to execute vector retrieval search.');
       // Clear the previous successful response so stale chunks from an
       // earlier query can never be displayed as though they answer this
       // failed request.
       setResponse(null);
     } finally {
-      setIsLoading(false);
+      if (isCurrent()) setIsLoading(false);
     }
+  };
+
+  const handleCancelSearch = () => {
+    retrievalRequest.cancel();
   };
 
   const handleCopy = (text: string, id: string) => {
@@ -248,6 +283,12 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
               <Terminal size={12} />
               Trace Mode {traceEnabled ? 'ON' : 'OFF'} for this request
             </span>
+            {isLoading && (
+              <button type="button" className="btn-secondary" onClick={handleCancelSearch}>
+                <X size={14} />
+                Cancel
+              </button>
+            )}
             <button
               type="submit"
               className="btn-primary"
@@ -269,6 +310,23 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
           </div>
         </form>
       </div>
+
+      {/* Cancelled state -- a user-initiated abort, not a backend/network
+          failure, so it is never shown alongside (or worded like) the
+          error banner below. */}
+      {isCancelled && (
+        <div className="warning-banner">
+          <XCircle size={22} style={{ flexShrink: 0, marginTop: 2 }} />
+          <div>
+            <div className="warning-title">Request Cancelled</div>
+            <div className="warning-desc">
+              The request was cancelled before a response was received. This only stops
+              the browser from waiting on or using the response -- it does not guarantee
+              any in-progress backend processing was halted.
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Error state */}
       {error && (
@@ -316,8 +374,11 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
             <div className="warning-title">Trace Unavailable</div>
             <div className="warning-desc">
               Trace Mode was requested, but backend trace capture is disabled
-              (<code>TRACE_ENABLED=false</code>). Retrieval and query decomposition are still
-              running normally. Only the final retrieved chunks are shown.
+              (<code>TRACE_ENABLED=false</code>). Retrieval is still running normally
+              (query decomposition may or may not run, depending on the Query Router
+              setting). Only the final retrieved chunks are shown -- the router's
+              decision and any sub-queries are part of the trace, so they are not
+              available here either.
             </div>
           </div>
         </div>
@@ -339,10 +400,46 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
             Original query: <span style={{ color: '#e2e8f0', fontWeight: 500 }}>"{response.trace.original_query}"</span>
           </div>
 
-          {response.trace.sub_queries.length > 1 ? (
+          {/* The router only ever decides WHETHER the decomposer runs; it
+              never generates sub-queries itself -- that distinction is kept
+              explicit in the three mutually-exclusive states below, derived
+              only from the trace's own `router_bypassed`/`sub_queries`
+              fields, never inferred from query text or length. */}
+          <div
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '0.35rem',
+              fontSize: '0.72rem',
+              fontWeight: 600,
+              padding: '0.2rem 0.6rem',
+              borderRadius: 9999,
+              marginBottom: '0.75rem',
+              color: response.trace.router_bypassed ? '#34d399' : '#94a3b8',
+              background: response.trace.router_bypassed
+                ? 'rgba(16, 185, 129, 0.12)'
+                : 'rgba(148, 163, 184, 0.1)',
+              border: `1px solid ${response.trace.router_bypassed ? 'rgba(16, 185, 129, 0.3)' : 'rgba(148, 163, 184, 0.2)'}`,
+            }}
+          >
+            <GitBranch size={11} />
+            {response.trace.router_bypassed
+              ? 'Query Router: bypassed decomposition (single-intent query)'
+              : 'Query Router: allowed decomposition'}
+          </div>
+
+          {response.trace.router_bypassed ? (
+            <div style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: '1rem' }}>
+              The router determined this query was confidently single-intent and skipped
+              the decomposer entirely -- the original query above was used directly for
+              retrieval.
+            </div>
+          ) : response.trace.sub_queries.length > 1 ? (
             <>
               <div style={{ fontSize: '0.78rem', color: '#94a3b8', marginBottom: '0.5rem' }}>
-                Decomposed into <strong style={{ color: '#818cf8' }}>{response.trace.sub_queries.length}</strong> retrieval sub-queries, each run independently and merged:
+                The decomposer split this query into{' '}
+                <strong style={{ color: '#818cf8' }}>{response.trace.sub_queries.length}</strong>{' '}
+                retrieval sub-queries, each run independently and merged:
               </div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginBottom: '1rem' }}>
                 {response.trace.sub_queries.map((subQuery, idx) => (
@@ -364,7 +461,8 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
             </>
           ) : (
             <div style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: '1rem' }}>
-              No decomposition occurred -- a single information need was detected, so retrieval ran against the original query only.
+              The decomposer ran (the router did not bypass it) and determined a single
+              information need, so retrieval ran against the original query only.
             </div>
           )}
 

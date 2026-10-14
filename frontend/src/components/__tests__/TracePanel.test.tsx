@@ -28,6 +28,7 @@ const TRACE: TraceData = {
   ],
   final_results: [],
   context: null,
+  router_bypassed: false,
 };
 
 describe('TracePanel overflow containment (DOM-level only)', () => {
