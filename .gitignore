@@ -108,3 +108,8 @@ frontend/dist/
 .eslintcache
 frontend/.vite/
 .claude
+
+
+# =========
+docs/ENGINEERING_NOTES
+# =========

@@ -82,6 +82,7 @@ async def search(
         section_id=request.section_id,
         trace=effective_trace,
         router_enabled=request.router_enabled,
+        candidate_limit=request.candidate_limit,
     )
 
     trace_response = None

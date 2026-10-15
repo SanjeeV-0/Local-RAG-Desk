@@ -49,6 +49,8 @@ class FakeRetrievalService:
         # Captures whatever the endpoint actually passed, so tests can
         # assert the per-request router override reached this far.
         self.received_router_enabled: bool | None = None
+        # Same, for the per-request candidate_limit override.
+        self.received_candidate_limit: int | None = None
 
     async def search(
         self,
@@ -64,6 +66,7 @@ class FakeRetrievalService:
         """Return deterministic retrieval results."""
 
         self.received_router_enabled = router_enabled
+        self.received_candidate_limit = candidate_limit
 
         result = RetrievedChunk(
             document_id=uuid4(),
@@ -1089,6 +1092,128 @@ def test_retrieval_search_trace_reports_router_bypassed_false() -> None:
         body = response.json()
         assert body["trace"] is not None
         assert body["trace"]["router_bypassed"] is False
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_retrieval_search_explicit_candidate_limit_reaches_service_unchanged() -> None:
+    """An explicit `candidate_limit` in the request body must reach
+    `RetrievalService.search` as the exact integer sent, not reinterpreted
+    as the final result `limit`."""
+
+    retrieval_service = FakeRetrievalService()
+    app.dependency_overrides[get_retrieval_service] = lambda: retrieval_service
+
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/retrieval/search",
+            json={"query": "retrieval augmented generation", "limit": 5, "candidate_limit": 200},
+        )
+
+        assert response.status_code == 200
+        assert retrieval_service.received_candidate_limit == 200
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_retrieval_search_omitted_candidate_limit_preserves_default_path() -> None:
+    """Omitting `candidate_limit` entirely must reach the service as `None`
+    -- preserving `RetrievalService.search`'s own existing
+    `max(limit, candidate_limit_floor)` default path exactly, not coerced
+    to any other value."""
+
+    retrieval_service = FakeRetrievalService()
+    app.dependency_overrides[get_retrieval_service] = lambda: retrieval_service
+
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/retrieval/search",
+            json={"query": "retrieval augmented generation", "limit": 5},
+        )
+
+        assert response.status_code == 200
+        assert retrieval_service.received_candidate_limit is None
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_retrieval_search_null_candidate_limit_preserves_default_path() -> None:
+    """An explicit JSON `null` must behave identically to omitting the
+    field entirely -- both mean "use the configured default"."""
+
+    retrieval_service = FakeRetrievalService()
+    app.dependency_overrides[get_retrieval_service] = lambda: retrieval_service
+
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/retrieval/search",
+            json={"query": "retrieval augmented generation", "limit": 5, "candidate_limit": None},
+        )
+
+        assert response.status_code == 200
+        assert retrieval_service.received_candidate_limit is None
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize("invalid_candidate_limit", [0, -5, 1001])
+def test_retrieval_search_rejects_out_of_range_candidate_limit(invalid_candidate_limit) -> None:
+    """`candidate_limit` must be rejected by request validation (422) when
+    it falls outside the documented 1-1000 bound, before ever reaching the
+    service."""
+
+    retrieval_service = FakeRetrievalService()
+    app.dependency_overrides[get_retrieval_service] = lambda: retrieval_service
+
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/retrieval/search",
+            json={
+                "query": "retrieval augmented generation",
+                "limit": 5,
+                "candidate_limit": invalid_candidate_limit,
+            },
+        )
+
+        assert response.status_code == 422
+        # The service must never have been reached with a bad value.
+        assert retrieval_service.received_candidate_limit is None
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_retrieval_search_rejects_candidate_limit_below_result_limit() -> None:
+    """A `candidate_limit` smaller than `limit` is rejected by request
+    validation (422) -- the same invariant `RetrievalService.search` itself
+    enforces, caught earlier at the HTTP boundary instead of surfacing as
+    an unhandled 500 from an uncaught `ValueError`."""
+
+    retrieval_service = FakeRetrievalService()
+    app.dependency_overrides[get_retrieval_service] = lambda: retrieval_service
+
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/retrieval/search",
+            json={"query": "retrieval augmented generation", "limit": 20, "candidate_limit": 5},
+        )
+
+        assert response.status_code == 422
+        assert retrieval_service.received_candidate_limit is None
 
     finally:
         app.dependency_overrides.clear()

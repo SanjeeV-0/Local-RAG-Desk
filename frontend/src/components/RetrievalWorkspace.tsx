@@ -12,7 +12,7 @@
  * tell "Trace Mode was off" apart from "Trace Mode was on but the server
  * has tracing disabled" and show the right message for each.
  */
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   RetrievalSearchRequest,
   RetrievalSearchResponse,
@@ -20,6 +20,8 @@ import {
   TraceData,
 } from '../types/research';
 import { searchRetrievedChunks } from '../api/research';
+import { listDocuments, DocumentApiUnavailableError } from '../api/documents';
+import { LogicalDocumentSummary } from '../types/document';
 import { useCancellableRequest } from '../hooks/useCancellableRequest';
 import {
   Search,
@@ -64,7 +66,9 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
 }) => {
   const [query, setQuery] = useState('');
   const [limit, setLimit] = useState(10);
-  const [documentIdFilter, setDocumentIdFilter] = useState(initialDocumentId || '');
+  const [candidateLimitInput, setCandidateLimitInput] = useState('');
+  const [selectedDocumentId, setSelectedDocumentId] = useState(initialDocumentId || '');
+  const [documentFilterText, setDocumentFilterText] = useState('');
   const [sectionIdFilter, setSectionIdFilter] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(!!initialDocumentId);
 
@@ -74,6 +78,87 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
   const [response, setResponse] = useState<RetrievalSearchResponse | null>(null);
   const [expandedChunkId, setExpandedChunkId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  // Document selector state -- loaded once via the existing GET /documents
+  // wrapper (`listDocuments`), never re-fetched per keystroke. The filter
+  // text below only narrows this already-loaded list client-side.
+  const [documents, setDocuments] = useState<LogicalDocumentSummary[]>([]);
+  const [documentsLoading, setDocumentsLoading] = useState(false);
+  const [documentsError, setDocumentsError] = useState<string | null>(null);
+  const [documentsApiUnavailable, setDocumentsApiUnavailable] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadDocuments = async () => {
+      setDocumentsLoading(true);
+      setDocumentsError(null);
+
+      try {
+        const docs = await listDocuments();
+        if (cancelled) return;
+        setDocuments(docs);
+        setDocumentsApiUnavailable(false);
+      } catch (err: any) {
+        if (cancelled) return;
+        if (err instanceof DocumentApiUnavailableError) {
+          setDocumentsApiUnavailable(true);
+          setDocuments([]);
+        } else {
+          setDocumentsError(err?.message || 'Failed to load documents.');
+        }
+      } finally {
+        if (!cancelled) setDocumentsLoading(false);
+      }
+    };
+
+    loadDocuments();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Builds a label that stays useful even when several documents share the
+  // same title -- version number and non-READY status are only appended
+  // when they actually help disambiguate, so the common case (one READY
+  // version, unique title) stays a plain, uncluttered title.
+  const documentOptions = useMemo(() => {
+    const titleCounts = new Map<string, number>();
+    for (const doc of documents) {
+      const title = doc.current_version?.title ?? 'Untitled document';
+      titleCounts.set(title, (titleCounts.get(title) ?? 0) + 1);
+    }
+
+    return documents.map((doc) => {
+      const title = doc.current_version?.title ?? 'Untitled document';
+      const isDuplicateTitle = (titleCounts.get(title) ?? 0) > 1;
+
+      let label = title;
+      if (!doc.current_version) {
+        label += ` (no current version -- ${doc.logical_document_id.slice(0, 8)})`;
+      } else {
+        if (isDuplicateTitle) {
+          label += ` (v${doc.current_version.version_number})`;
+        }
+        if (doc.current_version.status !== 'READY') {
+          label += ` [${doc.current_version.status}]`;
+        }
+      }
+
+      return {
+        id: doc.logical_document_id,
+        label,
+        searchText: `${title} ${doc.logical_document_id}`.toLowerCase(),
+      };
+    });
+  }, [documents]);
+
+  const filteredDocumentOptions = useMemo(() => {
+    const needle = documentFilterText.trim().toLowerCase();
+    if (!needle) return documentOptions;
+    return documentOptions.filter((opt) => opt.searchText.includes(needle));
+  }, [documentOptions, documentFilterText]);
 
   const retrievalRequest = useCancellableRequest();
 
@@ -93,11 +178,17 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
       trace: traceEnabled,
       router_enabled: routerEnabled,
     };
-    if (documentIdFilter.trim()) {
-      payload.document_id = documentIdFilter.trim();
+    if (selectedDocumentId) {
+      payload.document_id = selectedDocumentId;
     }
     if (sectionIdFilter.trim()) {
       payload.section_id = sectionIdFilter.trim();
+    }
+    const parsedCandidateLimit = candidateLimitInput.trim()
+      ? Number(candidateLimitInput)
+      : undefined;
+    if (parsedCandidateLimit !== undefined && Number.isFinite(parsedCandidateLimit)) {
+      payload.candidate_limit = parsedCandidateLimit;
     }
 
     try {
@@ -182,7 +273,7 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
             <div className="advanced-filters-grid" style={{ marginBottom: '1.25rem' }}>
               <div>
                 <label className="input-label" style={{ fontSize: '0.75rem', marginBottom: '0.35rem' }}>
-                  Candidate Limit (K chunks: {limit})
+                  Final Result Limit (Top {limit} chunks returned)
                 </label>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
                   <input
@@ -213,17 +304,23 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
                     disabled={isLoading}
                   />
                 </div>
+                <div style={{ fontSize: '0.7rem', color: '#64748b', marginTop: '0.3rem' }}>
+                  The number of reranked results returned -- not the number of candidates
+                  evaluated before reranking (see "Candidate Limit per Subquery" below).
+                </div>
               </div>
 
               <div>
                 <label className="input-label" style={{ fontSize: '0.75rem', marginBottom: '0.35rem' }}>
-                  Document Filter (UUID)
+                  Candidate Limit per Subquery (optional)
                 </label>
                 <input
-                  type="text"
-                  placeholder="Filter to specific document UUID (optional)"
-                  value={documentIdFilter}
-                  onChange={(e) => setDocumentIdFilter(e.target.value)}
+                  type="number"
+                  min={1}
+                  max={1000}
+                  placeholder="Server default applies"
+                  value={candidateLimitInput}
+                  onChange={(e) => setCandidateLimitInput(e.target.value)}
                   style={{
                     width: '100%',
                     background: 'rgba(15,23,42,0.8)',
@@ -236,6 +333,70 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
                   }}
                   disabled={isLoading}
                 />
+                <div style={{ fontSize: '0.7rem', color: '#64748b', marginTop: '0.3rem' }}>
+                  Candidates are fetched per subquery, then merged and deduplicated -- the
+                  combined pool can exceed this number when the query is decomposed into
+                  more than one subquery. Leave blank to use the server's configured
+                  default (shown in the trace summary below as "Candidate Limit" once a
+                  request completes with Trace Mode on).
+                </div>
+              </div>
+
+              <div>
+                <label className="input-label" style={{ fontSize: '0.75rem', marginBottom: '0.35rem' }}>
+                  Document Filter
+                </label>
+                <input
+                  type="text"
+                  placeholder="Filter documents by title..."
+                  value={documentFilterText}
+                  onChange={(e) => setDocumentFilterText(e.target.value)}
+                  style={{
+                    width: '100%',
+                    marginBottom: '0.4rem',
+                    background: 'rgba(15,23,42,0.8)',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: 6,
+                    color: '#f8fafc',
+                    padding: '0.45rem 0.75rem',
+                    fontSize: '0.8rem',
+                  }}
+                  disabled={isLoading || documentsLoading || documentsApiUnavailable}
+                />
+                <select
+                  value={selectedDocumentId}
+                  onChange={(e) => setSelectedDocumentId(e.target.value)}
+                  style={{
+                    width: '100%',
+                    background: 'rgba(15,23,42,0.8)',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: 6,
+                    color: '#f8fafc',
+                    padding: '0.45rem 0.75rem',
+                    fontSize: '0.8rem',
+                  }}
+                  disabled={isLoading || documentsLoading || documentsApiUnavailable}
+                >
+                  <option value="">— All documents (no filter) —</option>
+                  {filteredDocumentOptions.map((opt) => (
+                    <option key={opt.id} value={opt.id}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                <div style={{ fontSize: '0.7rem', color: '#64748b', marginTop: '0.3rem' }}>
+                  {documentsLoading
+                    ? 'Loading documents...'
+                    : documentsApiUnavailable
+                    ? 'Document list API is not available -- document filtering is unavailable.'
+                    : documentsError
+                    ? `Failed to load documents: ${documentsError}`
+                    : documents.length === 0
+                    ? 'No documents found.'
+                    : filteredDocumentOptions.length === 0 && documentFilterText.trim()
+                    ? 'No documents match that filter.'
+                    : 'Select "All documents" to clear the filter and search the whole corpus.'}
+                </div>
               </div>
 
               <div>
@@ -244,7 +405,7 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
                 </label>
                 <input
                   type="text"
-                  placeholder="Filter to specific section UUID (optional)"
+                  placeholder="Paste a section UUID (optional)"
                   value={sectionIdFilter}
                   onChange={(e) => setSectionIdFilter(e.target.value)}
                   style={{
@@ -259,6 +420,10 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
                   }}
                   disabled={isLoading}
                 />
+                <div style={{ fontSize: '0.7rem', color: '#64748b', marginTop: '0.3rem' }}>
+                  No section browser is available yet -- paste a section UUID directly
+                  (e.g. copied from a result's "Details" drawer below).
+                </div>
               </div>
             </div>
           )}

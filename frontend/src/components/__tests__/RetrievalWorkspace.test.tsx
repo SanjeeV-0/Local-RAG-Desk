@@ -1,17 +1,32 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { RetrievalWorkspace } from '../RetrievalWorkspace';
 import { searchRetrievedChunks } from '../../api/research';
+import { listDocuments } from '../../api/documents';
 import { RetrievalSearchResponse } from '../../types/research';
+import { LogicalDocumentSummary } from '../../types/document';
 
 vi.mock('../../api/research', () => ({
   searchRetrievedChunks: vi.fn(),
 }));
 
+vi.mock('../../api/documents', () => ({
+  listDocuments: vi.fn(),
+  DocumentApiUnavailableError: class DocumentApiUnavailableError extends Error {},
+}));
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+});
+
+// Every test in this file triggers the component's own document-list fetch
+// on mount; defaulting it to an empty, resolved list keeps tests that don't
+// care about the document picker from having to handle an unmocked/pending
+// promise.
+beforeEach(() => {
+  vi.mocked(listDocuments).mockResolvedValue([]);
 });
 
 const SUCCESSFUL_RESPONSE: RetrievalSearchResponse = {
@@ -196,5 +211,199 @@ describe('RetrievalWorkspace request cancellation', () => {
     await waitFor(() => expect(screen.getByText('Request Cancelled')).toBeInTheDocument());
     expect(screen.queryByText('Retrieval API Error')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Execute Vector Retrieval/i })).not.toBeDisabled();
+  });
+});
+
+const DOC_READY: LogicalDocumentSummary = {
+  logical_document_id: 'doc-aaa',
+  current_version: {
+    id: 'version-aaa',
+    logical_document_id: 'doc-aaa',
+    version_number: 1,
+    is_current: true,
+    status: 'READY',
+    title: 'Vector Search Fundamentals',
+    document_type: 'research_paper',
+    source: null,
+    processing_attempt: 1,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+    processing_started_at: null,
+    processing_completed_at: null,
+    failed_at: null,
+    last_error: null,
+  },
+};
+
+const DOC_DUPLICATE_TITLE_A: LogicalDocumentSummary = {
+  logical_document_id: 'doc-bbb',
+  current_version: {
+    ...DOC_READY.current_version!,
+    id: 'version-bbb',
+    logical_document_id: 'doc-bbb',
+    version_number: 2,
+    title: 'Shared Title',
+  },
+};
+
+const DOC_DUPLICATE_TITLE_B: LogicalDocumentSummary = {
+  logical_document_id: 'doc-ccc',
+  current_version: {
+    ...DOC_READY.current_version!,
+    id: 'version-ccc',
+    logical_document_id: 'doc-ccc',
+    version_number: 1,
+    status: 'PROCESSING',
+    title: 'Shared Title',
+  },
+};
+
+async function openAdvancedFilters(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole('button', { name: /Retrieval Filters/i }));
+}
+
+describe('RetrievalWorkspace document selector', () => {
+  it('shows a loading state, then populates the picker from listDocuments()', async () => {
+    const user = userEvent.setup();
+    vi.mocked(listDocuments).mockResolvedValueOnce([DOC_READY]);
+
+    render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
+    await openAdvancedFilters(user);
+
+    await waitFor(() =>
+      expect(screen.getByText('Vector Search Fundamentals')).toBeInTheDocument(),
+    );
+  });
+
+  it('calls listDocuments exactly once regardless of typing in the filter box', async () => {
+    const user = userEvent.setup();
+    vi.mocked(listDocuments).mockResolvedValueOnce([DOC_READY]);
+
+    render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
+    await openAdvancedFilters(user);
+
+    await waitFor(() => expect(listDocuments).toHaveBeenCalledTimes(1));
+
+    const filterInput = screen.getByPlaceholderText(/Filter documents by title/i);
+    await user.type(filterInput, 'Vector');
+
+    // No additional network calls from typing -- filtering is client-side
+    // over the already-loaded list.
+    expect(listDocuments).toHaveBeenCalledTimes(1);
+  });
+
+  it('disambiguates documents that share the same title using version/status', async () => {
+    const user = userEvent.setup();
+    vi.mocked(listDocuments).mockResolvedValueOnce([
+      DOC_DUPLICATE_TITLE_A,
+      DOC_DUPLICATE_TITLE_B,
+    ]);
+
+    render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
+    await openAdvancedFilters(user);
+
+    await waitFor(() => expect(screen.getByText(/Shared Title \(v2\)/)).toBeInTheDocument());
+    expect(screen.getByText(/Shared Title \(v1\) \[PROCESSING\]/)).toBeInTheDocument();
+  });
+
+  it('shows an error state when listDocuments fails', async () => {
+    const user = userEvent.setup();
+    vi.mocked(listDocuments).mockRejectedValueOnce(new Error('network down'));
+
+    render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
+    await openAdvancedFilters(user);
+
+    await waitFor(() =>
+      expect(screen.getByText(/Failed to load documents: network down/)).toBeInTheDocument(),
+    );
+  });
+
+  it('shows an explicit empty state when there are no documents', async () => {
+    const user = userEvent.setup();
+    vi.mocked(listDocuments).mockResolvedValueOnce([]);
+
+    render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
+    await openAdvancedFilters(user);
+
+    await waitFor(() => expect(screen.getByText('No documents found.')).toBeInTheDocument());
+  });
+
+  it('sends the selected document_id, and clearing the selection omits it', async () => {
+    const user = userEvent.setup();
+    vi.mocked(listDocuments).mockResolvedValueOnce([DOC_READY]);
+    const mocked = vi.mocked(searchRetrievedChunks);
+    mocked.mockResolvedValue(SUCCESSFUL_RESPONSE);
+
+    render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
+    await openAdvancedFilters(user);
+
+    await waitFor(() =>
+      expect(screen.getByText('Vector Search Fundamentals')).toBeInTheDocument(),
+    );
+
+    const select = screen.getByDisplayValue('— All documents (no filter) —');
+    await user.selectOptions(select, 'doc-aaa');
+
+    const textarea = screen.getByPlaceholderText(/Enter search query/i);
+    await user.type(textarea, 'a query');
+    await user.click(screen.getByRole('button', { name: /Execute Vector Retrieval/i }));
+
+    await waitFor(() => expect(mocked).toHaveBeenCalledTimes(1));
+    expect(mocked.mock.calls[0][0]).toMatchObject({ document_id: 'doc-aaa' });
+
+    // Clear the selection back to "All documents" and search again.
+    await user.selectOptions(select, '— All documents (no filter) —');
+    await user.click(screen.getByRole('button', { name: /Execute Vector Retrieval/i }));
+
+    await waitFor(() => expect(mocked).toHaveBeenCalledTimes(2));
+    expect(mocked.mock.calls[1][0]).not.toHaveProperty('document_id');
+  });
+});
+
+describe('RetrievalWorkspace candidate-limit control', () => {
+  it('sends an explicit candidate_limit when set', async () => {
+    const user = userEvent.setup();
+    const mocked = vi.mocked(searchRetrievedChunks);
+    mocked.mockResolvedValue(SUCCESSFUL_RESPONSE);
+
+    render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
+    await openAdvancedFilters(user);
+
+    const candidateLimitInput = screen.getByPlaceholderText(/Server default applies/i);
+    await user.type(candidateLimitInput, '200');
+
+    const textarea = screen.getByPlaceholderText(/Enter search query/i);
+    await user.type(textarea, 'a query');
+    await user.click(screen.getByRole('button', { name: /Execute Vector Retrieval/i }));
+
+    await waitFor(() => expect(mocked).toHaveBeenCalledTimes(1));
+    expect(mocked.mock.calls[0][0]).toMatchObject({ candidate_limit: 200 });
+  });
+
+  it('omits candidate_limit entirely when left unset, and never invents a value', async () => {
+    const user = userEvent.setup();
+    const mocked = vi.mocked(searchRetrievedChunks);
+    mocked.mockResolvedValue(SUCCESSFUL_RESPONSE);
+
+    render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
+    await openAdvancedFilters(user);
+
+    const textarea = screen.getByPlaceholderText(/Enter search query/i);
+    await user.type(textarea, 'a query');
+    await user.click(screen.getByRole('button', { name: /Execute Vector Retrieval/i }));
+
+    await waitFor(() => expect(mocked).toHaveBeenCalledTimes(1));
+    expect(mocked.mock.calls[0][0]).not.toHaveProperty('candidate_limit');
+  });
+
+  it('labels the final-result-limit control distinctly from the candidate-limit control', async () => {
+    const user = userEvent.setup();
+    render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
+    await openAdvancedFilters(user);
+
+    expect(screen.getByText(/Final Result Limit/i)).toBeInTheDocument();
+    expect(
+      screen.getByText('Candidate Limit per Subquery (optional)', { selector: 'label' }),
+    ).toBeInTheDocument();
   });
 });

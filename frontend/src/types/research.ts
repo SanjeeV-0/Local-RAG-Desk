@@ -122,6 +122,14 @@ export interface RetrievalSearchRequest {
   // See `ResearchRequest.router_enabled` -- identical per-request override
   // contract, shared by both endpoints.
   router_enabled?: boolean | null;
+  // Optional per-request override of the per-sub-query vector-search pool
+  // size (server validates 1-1000, and rejects a value smaller than
+  // `limit`). `null`/omitted means "use the server's own default"
+  // (`max(limit, Settings.retrieval_candidate_limit_floor)`) -- the UI must
+  // never invent or display a numeric default here itself; the actual
+  // value used is only ever knowable from `RetrievalTraceResponse.candidate_limit`
+  // once a request completes with tracing available.
+  candidate_limit?: number | null;
 }
 
 export interface RetrievedChunkResponse {

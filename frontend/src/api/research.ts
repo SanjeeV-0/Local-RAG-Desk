@@ -115,6 +115,11 @@ export async function searchRetrievedChunks(
   if (params.section_id) {
     payload.section_id = params.section_id;
   }
+  // Omitted (not even sent as `null`) when unset, so the server applies its
+  // own default -- never invent a numeric value here.
+  if (params.candidate_limit !== undefined && params.candidate_limit !== null) {
+    payload.candidate_limit = params.candidate_limit;
+  }
 
   try {
     const response = await fetch(`${API_BASE}/retrieval/search`, {

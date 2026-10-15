@@ -1,7 +1,7 @@
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class RetrievalSearchRequest(BaseModel):
@@ -20,6 +20,16 @@ class RetrievalSearchRequest(BaseModel):
     compatible. `True`/`False` controls the deterministic query router for
     THIS request only; it never mutates the application-wide setting and
     has no effect on any other request.
+
+    `candidate_limit` is an optional per-request override of the per-sub-
+    query vector-search pool size (`RetrievalService`'s own
+    `max(limit, Settings.retrieval_candidate_limit_floor)` default -- see
+    `app.retrieval.service.RetrievalService.search`). `None` (the default)
+    preserves that existing default exactly; omitting this field is fully
+    backward compatible. The bound (1-1000) mirrors the existing validated
+    range of `Settings.retrieval_candidate_limit_floor`, since both describe
+    the same quantity (a candidate-pool size), just configured at different
+    layers (server-wide floor vs. this request's explicit override).
     """
 
     query: str = Field(min_length=1)
@@ -28,6 +38,22 @@ class RetrievalSearchRequest(BaseModel):
     section_id: UUID | None = None
     trace: bool = False
     router_enabled: bool | None = None
+    candidate_limit: int | None = Field(default=None, ge=1, le=1000)
+
+    @model_validator(mode="after")
+    def _validate_candidate_limit_not_below_limit(self) -> "RetrievalSearchRequest":
+        """Reject an explicit `candidate_limit` smaller than `limit` at the
+        request-validation boundary (422), rather than letting it reach
+        `RetrievalService.search`'s own identical invariant check, which
+        raises a plain `ValueError` that neither this module nor
+        `app.api.retrieval` currently catches (it would otherwise surface as
+        an unhandled 500). The message matches that existing service-level
+        check exactly, since both enforce the same invariant."""
+
+        if self.candidate_limit is not None and self.candidate_limit < self.limit:
+            raise ValueError("candidate_limit must be greater than or equal to limit.")
+
+        return self
 
 
 class RetrievedChunkResponse(BaseModel):
