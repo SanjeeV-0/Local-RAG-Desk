@@ -1,5 +1,7 @@
 from unittest.mock import patch
 
+import pytest
+
 from app.config.settings import Settings
 from app.core.dependencies import (
     get_generation_provider,
@@ -110,6 +112,41 @@ def test_generation_provider_uses_generation_settings_not_decomposition_settings
     # into this generation provider instance.
     assert provider.top_k != 7
     assert provider.frequency_penalty != 0.1
+
+    get_generation_provider.cache_clear()
+
+
+def test_missing_openrouter_api_key_produces_a_safe_actionable_diagnostic() -> None:
+    """A missing `OPENROUTER_API_KEY` must fail fast with a clear message
+    naming the exact environment variable -- never a secret value, and
+    never left to surface as an opaque downstream provider/auth error."""
+
+    settings = Settings(openrouter_api_key=None)
+
+    get_generation_provider.cache_clear()
+
+    with patch("app.core.dependencies.get_settings", return_value=settings):
+        with pytest.raises(ValueError) as exc_info:
+            get_generation_provider()
+
+    assert "OPENROUTER_API_KEY" in str(exc_info.value)
+    assert "must be configured" in str(exc_info.value)
+
+    get_generation_provider.cache_clear()
+
+
+def test_empty_string_openrouter_api_key_is_treated_as_missing() -> None:
+    """An empty string is falsy, same as `None` -- both must be rejected by
+    the same safe, actionable check rather than silently constructing a
+    client with no usable credential."""
+
+    settings = Settings(openrouter_api_key="")
+
+    get_generation_provider.cache_clear()
+
+    with patch("app.core.dependencies.get_settings", return_value=settings):
+        with pytest.raises(ValueError, match="OPENROUTER_API_KEY must be configured"):
+            get_generation_provider()
 
     get_generation_provider.cache_clear()
 

@@ -1322,3 +1322,119 @@ def test_retrieval_search_decomposition_fallback_reason_is_safe_not_raw_exceptio
 
     finally:
         app.dependency_overrides.clear()
+
+
+class _PiiFakeRetrievalService(FakeRetrievalService):
+    """A fake retrieval service whose returned chunk contains a synthetic
+    PII span, to exercise /retrieval/search's end-to-end redaction path
+    (both the plain `results` list and, when traced, the trace fields)."""
+
+    async def search(
+        self,
+        query: str,
+        limit: int = 10,
+        max_distance=None,
+        document_id=None,
+        section_id=None,
+        candidate_limit=None,
+        trace: bool = False,
+        router_enabled: bool | None = None,
+    ) -> list[RetrievedChunk]:
+        self.last_decomposition_outcome = DecompositionOutcome(
+            original_query=query,
+            sub_queries=[query],
+            status="not_needed",
+        )
+
+        result = RetrievedChunk(
+            document_id=uuid4(),
+            chunk_id=uuid4(),
+            section_id=uuid4(),
+            section_path="Results",
+            page_numbers=[1],
+            content="Escalate to jdoe@example.com if urgent.",
+            distance=0.1,
+            rerank_score=1.0,
+        )
+
+        if trace:
+            candidate = RetrievalTraceCandidate(
+                document_id=result.document_id,
+                chunk_id=result.chunk_id,
+                section_id=result.section_id,
+                section_path=result.section_path,
+                page_numbers=result.page_numbers,
+                # Unlike the production service, this fake does NOT redact
+                # here -- it models the raw retrieval output; the real
+                # redaction behavior under test lives in
+                # RetrievalService._to_trace_candidate, exercised by the
+                # unit tests in tests/unit/test_retrieval_decomposition.py
+                # and tests/unit/test_context_assembler.py instead. This
+                # fake exists only to prove the `results` list (built
+                # directly in app.api.retrieval, not via a trace) is
+                # redacted independently.
+                content=result.content,
+                distance=result.distance,
+                rerank_score=result.rerank_score,
+            )
+            self.last_trace = RetrievalTrace(
+                query=query,
+                original_query=query,
+                sub_queries=[query],
+                candidate_limit=candidate_limit if candidate_limit is not None else max(limit, 50),
+                raw_candidate_count=1,
+                deduplicated_candidate_count=1,
+                candidates=[candidate],
+                final_results=[candidate],
+                router_bypassed=False,
+            )
+        else:
+            self.last_trace = None
+
+        return [result]
+
+
+def test_retrieval_search_redacts_pii_in_main_results_list() -> None:
+    app.dependency_overrides[get_retrieval_service] = lambda: _PiiFakeRetrievalService()
+
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/retrieval/search",
+            json={"query": "Who do I escalate to?"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+
+        assert "jdoe@example.com" not in str(body)
+        assert "[REDACTED:EMAIL]" in body["results"][0]["content"]
+        assert body["redaction"]["redaction_applied"] is True
+        assert body["redaction"]["affected_source_count"] == 1
+        assert body["redaction"]["possibly_incomplete"] is True
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_retrieval_search_clean_results_report_no_redaction() -> None:
+    app.dependency_overrides[get_retrieval_service] = lambda: FakeRetrievalService()
+
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/retrieval/search",
+            json={"query": "What is RAG?"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+
+        assert body["redaction"]["redaction_applied"] is False
+        assert body["redaction"]["affected_source_count"] == 0
+        assert body["redaction"]["possibly_incomplete"] is False
+
+    finally:
+        app.dependency_overrides.clear()

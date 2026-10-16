@@ -11,7 +11,7 @@ that way to preserve exact backward-compatible key presence/absence
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.config.settings import Settings
@@ -21,8 +21,12 @@ from app.core.dependencies import (
     get_retrieval_service,
 )
 from app.generation.context import ContextAssembler
+from app.generation.errors import ProviderUnavailableError
+from app.generation.extractive_summary import build_extractive_summary
 from app.generation.generation_service import GenerationService
 from app.observability.langfuse import get_langfuse
+from app.privacy.pii_detector import redact
+from app.privacy.schemas import RedactionOutcome
 from app.retrieval.service import RetrievalService
 
 router = APIRouter(
@@ -79,27 +83,9 @@ async def ask(
     effective_trace = trace_requested and settings.trace_enabled
     langfuse = get_langfuse()
 
-    if langfuse is None:
-        return await _execute_research(
-            query=query,
-            retrieval_service=retrieval_service,
-            generation_service=generation_service,
-            trace_requested=trace_requested,
-            effective_trace=effective_trace,
-            result_limit=settings.research_ask_result_limit,
-            router_enabled=request.router_enabled,
-        )
-
-    with langfuse.start_as_current_observation(
-        as_type="span",
-        name="research-request",
-        input={
-            "query": query,
-            "trace": trace_requested,
-        },
-    ) as observation:
-        try:
-            response = await _execute_research(
+    try:
+        if langfuse is None:
+            return await _execute_research(
                 query=query,
                 retrieval_service=retrieval_service,
                 generation_service=generation_service,
@@ -109,22 +95,70 @@ async def ask(
                 router_enabled=request.router_enabled,
             )
 
-            observation.update(
-                output={
-                    "answer": response["answer"],
-                    "model": response["model"],
-                    "source_count": len(response["sources"]),
-                },
-            )
+        # Never send the raw query to Langfuse -- redacted defensively here
+        # even though it is already redacted by the time it reaches this
+        # point (see `RetrievalService.search`).
+        with langfuse.start_as_current_observation(
+            as_type="span",
+            name="research-request",
+            input={
+                "query": redact(query).text,
+                "trace": trace_requested,
+            },
+        ) as observation:
+            try:
+                response = await _execute_research(
+                    query=query,
+                    retrieval_service=retrieval_service,
+                    generation_service=generation_service,
+                    trace_requested=trace_requested,
+                    effective_trace=effective_trace,
+                    result_limit=settings.research_ask_result_limit,
+                    router_enabled=request.router_enabled,
+                )
 
-            return response
+                # `response["answer"]` is already redacted by
+                # `GenerationService.generate` -- safe to send as-is.
+                observation.update(
+                    output={
+                        "answer": response["answer"],
+                        "model": response["model"],
+                        "source_count": len(response["sources"]),
+                    },
+                )
 
-        except Exception as exc:
-            observation.update(
-                level="ERROR",
-                status_message=str(exc),
-            )
-            raise
+                return response
+
+            except ProviderUnavailableError as exc:
+                observation.update(
+                    level="ERROR",
+                    status_message=exc.category.value,
+                )
+                raise
+
+            except Exception as exc:
+                # Any other, unclassified exception -- still never send its
+                # raw text to Langfuse.
+                observation.update(
+                    level="ERROR",
+                    status_message=exc.__class__.__name__,
+                )
+                raise
+
+    except ProviderUnavailableError as exc:
+        # Never let a provider failure (including a guardrail/policy
+        # rejection) fall through to FastAPI's default handler as an
+        # unhandled, generic 500 -- always a structured, safe response.
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": {
+                    "category": exc.category.value,
+                    "retryable": exc.retryable,
+                    "message": exc.safe_message,
+                }
+            },
+        ) from exc
 
 
 async def _execute_research(
@@ -168,30 +202,136 @@ async def _execute_research(
 
     context = ContextAssembler().assemble(results)
 
-    generation_result = await generation_service.generate(
-        query=query,
-        context=context,
-    )
+    sources = [
+        {
+            "document_id": source.document_id,
+            "chunk_id": source.chunk_id,
+            "section_id": source.section_id,
+            "section_path": source.section_path,
+            "page_numbers": source.page_numbers,
+        }
+        for source in context.sources
+    ]
+
+    decomposition_response = {
+        "original_query": decomposition_outcome.original_query,
+        "sub_queries": decomposition_outcome.sub_queries,
+        "status": decomposition_outcome.status,
+        "reason": decomposition_outcome.reason,
+    }
+
+    try:
+        generation_result = await generation_service.generate(
+            query=query,
+            context=context,
+        )
+    except ProviderUnavailableError as exc:
+        # Decomposition and retrieval already completed safely (decomposition
+        # falls back to the original query on its own provider failures --
+        # see `QueryDecomposer.decompose` -- and retrieval is entirely local,
+        # so the ONLY provider call that can fail this way is generation).
+        # When retrieval already found usable, redacted sources, discarding
+        # them along with the whole request just because the single
+        # generation call was rejected throws away safe, already-available
+        # information. Never retried with different/unredacted content --
+        # `build_extractive_summary` makes no provider call at all, so the
+        # guardrail/provider rejection is never bypassed or re-attempted,
+        # only worked around locally using content already in hand.
+        if not sources:
+            # Nothing safe to return -- a plain, safe error is the honest
+            # response, matching the pre-existing behavior for this case.
+            raise
+
+        generation_error = {
+            "category": exc.category.value,
+            "retryable": exc.retryable,
+            "message": exc.safe_message,
+        }
+
+        # `context.sources` (not the plain `sources` dicts above) carries
+        # each source's already-redacted text -- see
+        # `GenerationContextSource.content`. Only that redacted text is ever
+        # read here; the extractive summary cannot see or reintroduce the
+        # original, unredacted chunk content.
+        summary = build_extractive_summary(query=query, sources=context.sources)
+
+        if summary is None:
+            # Safe summarization is not possible (e.g. every redacted
+            # source was empty/whitespace-only) -- retain the plain safe
+            # error state rather than inventing an answer.
+            return {
+                "answer": None,
+                "model": None,
+                "sources": sources,
+                "decomposition": decomposition_response,
+                "redaction": RedactionOutcome(
+                    redaction_applied=context.redacted_source_count > 0,
+                    affected_source_count=context.redacted_source_count,
+                    answer_redacted=False,
+                    # `possibly_incomplete` must reflect whether REDACTION
+                    # made the response incomplete, not whether generation
+                    # failed -- that is a separate fact, already conveyed by
+                    # `partial`/`answer_method`/`generation_error` and its
+                    # own banner. Hardcoding this to True regardless of
+                    # `affected_source_count` produced a banner with no
+                    # actual content to describe (an empty count/message)
+                    # whenever nothing was redacted.
+                    possibly_incomplete=context.redacted_source_count > 0,
+                ).model_dump(),
+                "partial": True,
+                "answer_method": "unavailable",
+                "generation_error": generation_error,
+                "trace_requested": trace_requested,
+                "trace_available": False,
+                "trace_unavailable_reason": (
+                    "server_disabled" if trace_requested and not effective_trace else None
+                ),
+            }
+
+        return {
+            "answer": summary.text,
+            "model": None,
+            "sources": sources,
+            "decomposition": decomposition_response,
+            "redaction": RedactionOutcome(
+                redaction_applied=context.redacted_source_count > 0,
+                affected_source_count=context.redacted_source_count,
+                answer_redacted=False,
+                # See the matching comment in the `summary is None` branch
+                # above -- this must reflect actual redaction, not the fact
+                # that generation failed (already conveyed separately).
+                possibly_incomplete=context.redacted_source_count > 0,
+            ).model_dump(),
+            "partial": True,
+            # Clearly distinguishes this from a normally generated answer --
+            # never presented as though the LLM produced it. See
+            # `app.generation.extractive_summary`.
+            "answer_method": "extractive_fallback",
+            "generation_error": generation_error,
+            "trace_requested": trace_requested,
+            "trace_available": False,
+            "trace_unavailable_reason": (
+                "server_disabled" if trace_requested and not effective_trace else None
+            ),
+        }
 
     response: dict[str, object] = {
         "answer": generation_result.text,
         "model": generation_result.model,
-        "sources": [
-            {
-                "document_id": source.document_id,
-                "chunk_id": source.chunk_id,
-                "section_id": source.section_id,
-                "section_path": source.section_path,
-                "page_numbers": source.page_numbers,
-            }
-            for source in context.sources
-        ],
-        "decomposition": {
-            "original_query": decomposition_outcome.original_query,
-            "sub_queries": decomposition_outcome.sub_queries,
-            "status": decomposition_outcome.status,
-            "reason": decomposition_outcome.reason,
-        },
+        "sources": sources,
+        "decomposition": decomposition_response,
+        "redaction": RedactionOutcome(
+            redaction_applied=(
+                context.redacted_source_count > 0 or generation_result.answer_redacted
+            ),
+            affected_source_count=context.redacted_source_count,
+            answer_redacted=generation_result.answer_redacted,
+            possibly_incomplete=(
+                context.redacted_source_count > 0 or generation_result.answer_redacted
+            ),
+        ).model_dump(),
+        "partial": False,
+        "answer_method": "generated",
         "trace_requested": trace_requested,
         "trace_available": False,
         "trace_unavailable_reason": (

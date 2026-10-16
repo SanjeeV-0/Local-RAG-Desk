@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 from openai import AsyncOpenAI
 
+from app.generation.errors import ProviderErrorCategory, ProviderUnavailableError
 from app.retrieval.openrouter_decomposition import (
     OpenRouterQueryDecompositionProvider,
 )
@@ -157,8 +158,10 @@ async def test_rejects_non_string_queries(provider) -> None:
 async def test_rejects_empty_response(provider) -> None:
     provider.client.chat.completions.create.return_value = make_response(None)
 
-    with pytest.raises(RuntimeError, match="empty decomposition"):
+    with pytest.raises(ProviderUnavailableError) as exc_info:
         await provider.decompose("What is RAG?")
+
+    assert exc_info.value.category == ProviderErrorCategory.INVALID_PROVIDER_RESPONSE
 
 
 @pytest.mark.asyncio
@@ -273,6 +276,32 @@ def test_default_max_retries_matches_sdk_default() -> None:
     )
 
     assert provider.client.max_retries == 2
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_error_is_classified_as_retryable_with_safe_message(provider) -> None:
+    import httpx
+    from openai import RateLimitError
+
+    raw_body_marker = "SYNTHETIC_TEST_RAW_BODY_MARKER_67890"
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    response = httpx.Response(
+        status_code=429,
+        request=request,
+        json={"error": {"message": raw_body_marker}},
+    )
+    provider.client.chat.completions.create.side_effect = RateLimitError(
+        message=raw_body_marker,
+        response=response,
+        body={"error": {"message": raw_body_marker}},
+    )
+
+    with pytest.raises(ProviderUnavailableError) as exc_info:
+        await provider.decompose("What is RAG?")
+
+    assert exc_info.value.category == ProviderErrorCategory.RATE_LIMITED
+    assert exc_info.value.retryable is True
+    assert raw_body_marker not in str(exc_info.value)
 
 
 def test_generation_and_decomposition_settings_do_not_cross_contaminate() -> None:

@@ -11,7 +11,14 @@ internally for retryable errors.
 
 import json
 
+import openai
 from openai import AsyncOpenAI
+
+from app.generation.errors import (
+    ProviderErrorCategory,
+    ProviderUnavailableError,
+    wrap_openai_exception,
+)
 
 
 class OpenRouterQueryDecompositionProvider:
@@ -127,12 +134,20 @@ class OpenRouterQueryDecompositionProvider:
             # all).
             request_kwargs["extra_body"] = {"top_k": self.top_k}
 
-        response = await self.client.chat.completions.create(**request_kwargs)
+        try:
+            response = await self.client.chat.completions.create(**request_kwargs)
+        except openai.OpenAIError as exc:
+            # Never propagate the raw exception -- see
+            # app.generation.errors for the shared, safe classification used
+            # by both OpenRouter call sites in this application. Caught by
+            # `QueryDecomposer.decompose`, which falls back to the original
+            # query alone rather than propagating this failure.
+            raise wrap_openai_exception(exc) from exc
 
         message = response.choices[0].message.content
 
         if message is None:
-            raise RuntimeError("OpenRouter returned an empty decomposition response.")
+            raise ProviderUnavailableError(ProviderErrorCategory.INVALID_PROVIDER_RESPONSE)
 
         try:
             payload = json.loads(message)

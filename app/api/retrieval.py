@@ -16,6 +16,8 @@ from app.core.dependencies import (
     get_app_settings,
     get_retrieval_service,
 )
+from app.privacy.pii_detector import redact
+from app.privacy.schemas import RedactionOutcome
 from app.retrieval.schemas import (
     DecompositionOutcomeResponse,
     RetrievalSearchRequest,
@@ -125,26 +127,42 @@ async def search(
         "server_disabled" if request.trace and not settings.trace_enabled else None
     )
 
-    return RetrievalSearchResponse(
-        results=[
+    redacted_source_count = 0
+    response_results: list[RetrievedChunkResponse] = []
+
+    for result in results:
+        content_redaction = redact(result.content)
+
+        if content_redaction.redacted:
+            redacted_source_count += 1
+
+        response_results.append(
             RetrievedChunkResponse(
                 document_id=result.document_id,
                 chunk_id=result.chunk_id,
                 section_id=result.section_id,
                 section_path=result.section_path,
                 page_numbers=result.page_numbers,
-                content=result.content,
+                content=content_redaction.text,
                 distance=result.distance,
                 similarity=result.similarity,
                 rerank_score=result.rerank_score,
             )
-            for result in results
-        ],
+        )
+
+    return RetrievalSearchResponse(
+        results=response_results,
         decomposition=DecompositionOutcomeResponse(
             original_query=decomposition_outcome.original_query,
             sub_queries=decomposition_outcome.sub_queries,
             status=decomposition_outcome.status,
             reason=decomposition_outcome.reason,
+        ),
+        redaction=RedactionOutcome(
+            redaction_applied=redacted_source_count > 0,
+            affected_source_count=redacted_source_count,
+            answer_redacted=False,
+            possibly_incomplete=redacted_source_count > 0,
         ),
         trace_requested=request.trace,
         trace_available=trace_response is not None,

@@ -10,6 +10,7 @@ from app.core.dependencies import (
     get_retrieval_service,
 )
 from app.generation.context import GenerationContext
+from app.generation.errors import ProviderErrorCategory, ProviderUnavailableError
 from app.generation.generation_service import GenerationResult
 from app.main import app
 from app.retrieval.decomposition_outcome import DecompositionOutcome
@@ -317,6 +318,386 @@ async def test_research_ask_decomposition_outcome_present_without_trace(status, 
         assert body["decomposition"]["original_query"] == "What is RAG?"
         assert body["decomposition"]["sub_queries"] == ["What is RAG?"]
         assert body["decomposition"]["reason"] == reason
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+class _PiiRetrievalService(FakeRetrievalService):
+    """A retrieval service whose only chunk contains a synthetic PII span,
+    to exercise the end-to-end redaction path through the real /research/ask
+    route (not just the unit-level ContextAssembler/GenerationService)."""
+
+    async def search(self, query: str, limit: int = 10, **kwargs) -> list[RetrievedChunk]:
+        self.last_decomposition_outcome = DecompositionOutcome(
+            original_query=query,
+            sub_queries=[query],
+            status="not_needed",
+        )
+        self.last_trace = None
+
+        return [
+            RetrievedChunk(
+                document_id=uuid4(),
+                chunk_id=uuid4(),
+                section_id=uuid4(),
+                section_path="Results",
+                page_numbers=[1],
+                content="Contact jdoe@example.com for the full dataset.",
+                distance=0.1,
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_research_ask_reports_redaction_outcome_for_pii_bearing_source() -> None:
+    retrieval_service = _PiiRetrievalService()
+    generation_service = FakeGenerationService()
+
+    app.dependency_overrides[get_retrieval_service] = lambda: retrieval_service
+    app.dependency_overrides[get_generation_service] = lambda: generation_service
+
+    try:
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/research/ask", json={"query": "Who do I contact?"})
+
+        assert response.status_code == 200
+        body = response.json()
+
+        assert "jdoe@example.com" not in str(body)
+        assert body["redaction"]["redaction_applied"] is True
+        assert body["redaction"]["affected_source_count"] == 1
+        assert body["redaction"]["possibly_incomplete"] is True
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_research_ask_clean_request_reports_no_redaction() -> None:
+    retrieval_service = FakeRetrievalService()
+    generation_service = FakeGenerationService()
+
+    app.dependency_overrides[get_retrieval_service] = lambda: retrieval_service
+    app.dependency_overrides[get_generation_service] = lambda: generation_service
+
+    try:
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/research/ask", json={"query": "What is RAG?"})
+
+        assert response.status_code == 200
+        body = response.json()
+
+        assert body["redaction"]["redaction_applied"] is False
+        assert body["redaction"]["affected_source_count"] == 0
+        assert body["redaction"]["answer_redacted"] is False
+        assert body["redaction"]["possibly_incomplete"] is False
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+class _GuardrailRejectingGenerationService:
+    async def generate(self, query: str, context: GenerationContext) -> GenerationResult:
+        raise ProviderUnavailableError(ProviderErrorCategory.GUARDRAIL_OR_POLICY_REJECTION)
+
+
+class _EmptyRetrievalService(FakeRetrievalService):
+    """Retrieval succeeds but finds nothing -- there is no safe content to
+    fall back to if generation then fails."""
+
+    async def search(self, query: str, limit: int = 10, **kwargs) -> list[RetrievedChunk]:
+        self.last_decomposition_outcome = DecompositionOutcome(
+            original_query=query,
+            sub_queries=[query],
+            status="not_needed",
+        )
+        self.last_trace = None
+        return []
+
+
+@pytest.mark.asyncio
+async def test_research_ask_guardrail_rejection_with_no_sources_returns_safe_502() -> None:
+    """When retrieval found nothing, there is no safe partial result to
+    return -- a guardrail rejection must still surface as a clear, safe
+    error, never a generic 500 and never raw provider details."""
+
+    app.dependency_overrides[get_retrieval_service] = lambda: _EmptyRetrievalService()
+    app.dependency_overrides[get_generation_service] = lambda: (
+        _GuardrailRejectingGenerationService()
+    )
+
+    try:
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/research/ask", json={"query": "What is RAG?"})
+
+        assert response.status_code == 502
+        body = response.json()
+
+        assert body["detail"]["error"]["category"] == "guardrail_or_policy_rejection"
+        assert body["detail"]["error"]["retryable"] is False
+        assert "message" in body["detail"]["error"]
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_research_ask_guardrail_rejection_with_sources_returns_extractive_fallback() -> None:
+    """When retrieval already found safe, usable sources, a generation
+    failure must not discard them -- the request should still succeed (200)
+    with a useful, locally-built extractive summary of those sources,
+    clearly labeled as such (never presented as a generated answer), plus
+    an explicit `partial: true` and a safe (never raw) `generation_error`."""
+
+    app.dependency_overrides[get_retrieval_service] = lambda: FakeRetrievalService()
+    app.dependency_overrides[get_generation_service] = lambda: (
+        _GuardrailRejectingGenerationService()
+    )
+
+    try:
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/research/ask", json={"query": "What is RAG?"})
+
+        assert response.status_code == 200
+        body = response.json()
+
+        assert body["partial"] is True
+        assert body["answer_method"] == "extractive_fallback"
+        assert body["answer"] is not None
+        assert "RAG retrieves relevant information before generation." in body["answer"]
+        assert "[Source 1]" in body["answer"]
+        assert body["model"] is None
+        assert len(body["sources"]) == 1
+        assert body["sources"][0]["section_path"] == "Results"
+        assert body["decomposition"]["status"] == "not_needed"
+        assert body["generation_error"]["category"] == "guardrail_or_policy_rejection"
+        assert body["generation_error"]["retryable"] is False
+        assert "message" in body["generation_error"]
+        # Never the raw ProviderUnavailableError repr/str, only the fixed
+        # safe message/category fields.
+        assert "Traceback" not in str(body)
+
+        # Regression: the fallback source contains no PII at all, so the
+        # redaction outcome must NOT claim the response is incomplete due to
+        # redaction -- that would previously render a stray, contentless
+        # "Some content was withheld" banner (empty count, dangling period).
+        # The generation failure itself is already conveyed separately via
+        # `partial`/`answer_method`/`generation_error`.
+        assert body["redaction"]["redaction_applied"] is False
+        assert body["redaction"]["affected_source_count"] == 0
+        assert body["redaction"]["possibly_incomplete"] is False
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+class _PiiPhoneRetrievalService(FakeRetrievalService):
+    """Retrieval returns a source containing a phone number, to exercise the
+    extractive fallback's handling of already-redacted content end-to-end
+    through the real /research/ask route."""
+
+    async def search(self, query: str, limit: int = 10, **kwargs) -> list[RetrievedChunk]:
+        self.last_decomposition_outcome = DecompositionOutcome(
+            original_query=query,
+            sub_queries=[query],
+            status="not_needed",
+        )
+        self.last_trace = None
+
+        return [
+            RetrievedChunk(
+                document_id=uuid4(),
+                chunk_id=uuid4(),
+                section_id=uuid4(),
+                section_path="Support",
+                page_numbers=[1],
+                content="For escalation, call 555-123-4567 during business hours.",
+                distance=0.1,
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_research_ask_extractive_fallback_never_exposes_unredacted_phone_number() -> None:
+    app.dependency_overrides[get_retrieval_service] = lambda: _PiiPhoneRetrievalService()
+    app.dependency_overrides[get_generation_service] = lambda: (
+        _GuardrailRejectingGenerationService()
+    )
+
+    try:
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/research/ask", json={"query": "How do I escalate?"}
+            )
+
+        assert response.status_code == 200
+        body = response.json()
+
+        assert body["partial"] is True
+        assert body["answer_method"] == "extractive_fallback"
+        assert "555-123-4567" not in str(body)
+        assert "[REDACTED:PHONE]" in body["answer"]
+        assert body["redaction"]["redaction_applied"] is True
+        assert body["redaction"]["affected_source_count"] == 1
+        # One redacted source -- the banner has real content to describe.
+        assert body["redaction"]["possibly_incomplete"] is True
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+class _MultiplePiiRetrievalService(FakeRetrievalService):
+    """Retrieval returns several sources, more than one containing PII --
+    exercises the multi-source redaction count end-to-end."""
+
+    async def search(self, query: str, limit: int = 10, **kwargs) -> list[RetrievedChunk]:
+        self.last_decomposition_outcome = DecompositionOutcome(
+            original_query=query,
+            sub_queries=[query],
+            status="not_needed",
+        )
+        self.last_trace = None
+
+        return [
+            RetrievedChunk(
+                document_id=uuid4(),
+                chunk_id=uuid4(),
+                section_id=uuid4(),
+                section_path="Support",
+                page_numbers=[1],
+                content="For escalation, call 555-123-4567 during business hours.",
+                distance=0.1,
+            ),
+            RetrievedChunk(
+                document_id=uuid4(),
+                chunk_id=uuid4(),
+                section_id=uuid4(),
+                section_path="Contacts",
+                page_numbers=[2],
+                content="Email jdoe@example.com for billing questions.",
+                distance=0.12,
+            ),
+            RetrievedChunk(
+                document_id=uuid4(),
+                chunk_id=uuid4(),
+                section_id=uuid4(),
+                section_path="General",
+                page_numbers=[3],
+                content="The documentation portal is updated weekly.",
+                distance=0.2,
+            ),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_research_ask_extractive_fallback_reports_multiple_redacted_sources() -> None:
+    app.dependency_overrides[get_retrieval_service] = lambda: _MultiplePiiRetrievalService()
+    app.dependency_overrides[get_generation_service] = lambda: (
+        _GuardrailRejectingGenerationService()
+    )
+
+    try:
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/research/ask", json={"query": "How do I get help?"})
+
+        assert response.status_code == 200
+        body = response.json()
+
+        assert "555-123-4567" not in str(body)
+        assert "jdoe@example.com" not in str(body)
+        assert "[REDACTED:PHONE]" in body["answer"]
+        assert "[REDACTED:EMAIL]" in body["answer"]
+        assert body["redaction"]["redaction_applied"] is True
+        # Exactly two of the three sources contained PII.
+        assert body["redaction"]["affected_source_count"] == 2
+        assert body["redaction"]["possibly_incomplete"] is True
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+class _EmptyContentRetrievalService(FakeRetrievalService):
+    """Retrieval returns a source whose content is entirely whitespace --
+    there is nothing for the extractive fallback to extract, so the plain
+    safe error state must be retained instead of inventing an answer."""
+
+    async def search(self, query: str, limit: int = 10, **kwargs) -> list[RetrievedChunk]:
+        self.last_decomposition_outcome = DecompositionOutcome(
+            original_query=query,
+            sub_queries=[query],
+            status="not_needed",
+        )
+        self.last_trace = None
+
+        return [
+            RetrievedChunk(
+                document_id=uuid4(),
+                chunk_id=uuid4(),
+                section_id=uuid4(),
+                section_path="Results",
+                page_numbers=[1],
+                content="   ",
+                distance=0.1,
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_research_ask_retains_safe_error_when_extractive_summary_not_possible() -> None:
+    app.dependency_overrides[get_retrieval_service] = lambda: _EmptyContentRetrievalService()
+    app.dependency_overrides[get_generation_service] = lambda: (
+        _GuardrailRejectingGenerationService()
+    )
+
+    try:
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/research/ask", json={"query": "What is RAG?"})
+
+        assert response.status_code == 200
+        body = response.json()
+
+        assert body["partial"] is True
+        assert body["answer_method"] == "unavailable"
+        assert body["answer"] is None
+        assert body["generation_error"]["category"] == "guardrail_or_policy_rejection"
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_research_ask_normal_response_reports_partial_false() -> None:
+    app.dependency_overrides[get_retrieval_service] = lambda: FakeRetrievalService()
+    app.dependency_overrides[get_generation_service] = lambda: FakeGenerationService()
+
+    try:
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/research/ask", json={"query": "What is RAG?"})
+
+        assert response.status_code == 200
+        body = response.json()
+
+        assert body["partial"] is False
+        assert body["answer_method"] == "generated"
+        assert "generation_error" not in body
+        assert body["answer"] is not None
 
     finally:
         app.dependency_overrides.clear()

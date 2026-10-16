@@ -3,6 +3,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.privacy.schemas import RedactionOutcome
+
 
 class RetrievalSearchRequest(BaseModel):
     """Request payload for vector retrieval.
@@ -167,10 +169,16 @@ class RetrievalSearchResponse(BaseModel):
 
     `decomposition` is always present (independent of `trace`/
     `trace_available`) -- see `DecompositionOutcomeResponse`.
+
+    `redaction` is always present -- see
+    `app.privacy.schemas.RedactionOutcome`. It reports whether any returned
+    source's content had PII-shaped spans redacted, so a caller can never
+    mistake a redacted result for a guaranteed-complete one.
     """
 
     results: list[RetrievedChunkResponse]
     decomposition: DecompositionOutcomeResponse
+    redaction: RedactionOutcome
     trace_requested: bool
     trace_available: bool
     trace_unavailable_reason: Literal["server_disabled"] | None = None
