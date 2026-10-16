@@ -20,6 +20,7 @@ from app.core.repositories.document import DocumentRepository
 from app.embeddings.provider import EmbeddingProvider
 from app.generation.context import ContextAssembler
 from app.observability.langfuse import get_langfuse
+from app.privacy.pii_detector import redact
 from app.retrieval.decomposition_outcome import (
     FALLBACK_REASON,
     DecompositionOutcome,
@@ -105,6 +106,16 @@ class RetrievalService:
         self.last_trace = None
         self.last_decomposition_outcome = None
 
+        # Redact PII-shaped spans in the query before it reaches anything
+        # external (the decomposition OpenRouter call) or observational
+        # (Langfuse, trace, decomposition outcome). Retrieval/embedding runs
+        # entirely locally (no network call -- see
+        # `app.embeddings.sentence_transformer`), so using the redacted
+        # query for embedding too only affects the rare case where the query
+        # itself contained a PII-shaped span; it never changes behavior for
+        # the overwhelming majority of ordinary queries.
+        query = redact(query).text
+
         if candidate_limit is None:
             candidate_limit = max(limit, self.candidate_limit_floor)
 
@@ -171,9 +182,18 @@ class RetrievalService:
                 return results
 
             except Exception as exc:
+                # Never send the raw exception text to Langfuse -- only a
+                # safe category. `ProviderUnavailableError` (raised by the
+                # decomposition provider on an OpenRouter failure, though it
+                # is normally already caught and absorbed by
+                # `QueryDecomposer.decompose`) carries a safe category name;
+                # any other exception type reports only its class name,
+                # never its message.
+                category = getattr(exc, "category", None)
+                safe_status = category.value if category is not None else exc.__class__.__name__
                 observation.update(
                     level="ERROR",
-                    status_message=str(exc),
+                    status_message=safe_status,
                 )
                 raise
 
@@ -235,7 +255,13 @@ class RetrievalService:
             # retrieval is single-query or multi-query, and it has no
             # dependency on `trace` whatsoever.
             decomposition = await self.query_decomposer.decompose(query)
-            retrieval_queries = decomposition.sub_queries
+            # The input `query` was already redacted above, so the
+            # decomposer itself never sees a raw PII-shaped span -- this
+            # second pass guards against the (expected to be rare) case
+            # where the decomposer's own output reconstructs or echoes a
+            # PII-shaped pattern that wasn't present in its (already
+            # redacted) input.
+            retrieval_queries = tuple(redact(q).text for q in decomposition.sub_queries)
 
             if decomposition.fallback_reason is not None:
                 # The provider/parsing failed inside QueryDecomposer, which
@@ -348,7 +374,13 @@ class RetrievalService:
     def _to_trace_candidate(
         chunk: RetrievedChunk,
     ) -> RetrievalTraceCandidate:
-        """Convert a retrieved chunk into trace metadata."""
+        """Convert a retrieved chunk into trace metadata.
+
+        `content` is redacted here -- this is the single shared conversion
+        point behind `last_trace.candidates`, `last_trace.final_results`,
+        and `last_trace.context.sources`, so none of them can ever diverge
+        from the redaction already applied to the generation context itself.
+        """
 
         return RetrievalTraceCandidate(
             chunk_id=chunk.chunk_id,
@@ -356,7 +388,7 @@ class RetrievalService:
             section_id=chunk.section_id,
             section_path=chunk.section_path,
             page_numbers=chunk.page_numbers,
-            content=chunk.content,
+            content=redact(chunk.content).text,
             distance=chunk.distance,
             rerank_score=chunk.rerank_score,
         )

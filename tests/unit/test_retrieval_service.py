@@ -13,12 +13,21 @@ class FakeEmbeddingProvider:
 
 
 class FakeRepository:
+    """Mirrors `DocumentRepository.search_similar_chunks`'s actual filter
+    semantics closely enough to catch a service-layer regression without a
+    real database: `document_id`/`section_id`, when provided, are compared
+    directly against each chunk's own `document_id`/`section_id` -- exactly
+    like the real repository's `DocumentChunk.document_id ==
+    document_id` / `DocumentChunk.section_id == section_id` WHERE clauses."""
+
     def __init__(
         self,
         chunks: list[RetrievedChunk],
     ) -> None:
         self.chunks = chunks
         self.received_limit = None
+        self.received_document_id = None
+        self.received_section_id = None
 
     async def search_similar_chunks(
         self,
@@ -29,7 +38,18 @@ class FakeRepository:
         section_id=None,
     ):
         self.received_limit = limit
-        return self.chunks
+        self.received_document_id = document_id
+        self.received_section_id = section_id
+
+        results = self.chunks
+
+        if document_id is not None:
+            results = [c for c in results if c.document_id == document_id]
+
+        if section_id is not None:
+            results = [c for c in results if c.section_id == section_id]
+
+        return results
 
 
 class FakeReranker:
@@ -44,11 +64,11 @@ class FakeReranker:
         return list(reversed(chunks))
 
 
-def _chunk(index: int) -> RetrievedChunk:
+def _chunk(index: int, document_id=None, section_id=None) -> RetrievedChunk:
     return RetrievedChunk(
-        document_id=uuid4(),
+        document_id=document_id if document_id is not None else uuid4(),
         chunk_id=uuid4(),
-        section_id=uuid4(),
+        section_id=section_id if section_id is not None else uuid4(),
         section_path="Results",
         page_numbers=[1],
         content=f"chunk {index}",
@@ -232,3 +252,165 @@ async def test_configured_candidate_limit_floor_does_not_override_a_larger_expli
     await service.search("query", limit=30)
 
     assert repository.received_limit == 30
+
+
+@pytest.mark.asyncio
+async def test_unfiltered_retrieval_returns_results_across_all_documents() -> None:
+    """Baseline: with no `document_id`, retrieval must continue to work
+    exactly as before -- chunks from any document are eligible."""
+
+    doc_a, doc_b = uuid4(), uuid4()
+    chunks = [_chunk(1, document_id=doc_a), _chunk(2, document_id=doc_b)]
+
+    repository = FakeRepository(chunks)
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    results = await service.search("query", limit=10, candidate_limit=10)
+
+    assert repository.received_document_id is None
+    assert {r.content for r in results} == {"chunk 1", "chunk 2"}
+
+
+@pytest.mark.asyncio
+async def test_document_filter_returns_only_that_documents_chunks() -> None:
+    """Selecting a document must return its matching chunks -- and only
+    its chunks, never another document's."""
+
+    target_document = uuid4()
+    other_document = uuid4()
+    chunks = [
+        _chunk(1, document_id=target_document),
+        _chunk(2, document_id=other_document),
+    ]
+
+    repository = FakeRepository(chunks)
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    results = await service.search(
+        "query",
+        limit=10,
+        candidate_limit=10,
+        document_id=target_document,
+    )
+
+    assert repository.received_document_id == target_document
+    assert len(results) == 1
+    assert results[0].content == "chunk 1"
+    assert results[0].document_id == target_document
+
+
+@pytest.mark.asyncio
+async def test_document_filter_with_no_matching_chunks_returns_empty() -> None:
+    """A document with no relevant (or no) chunks must correctly return no
+    results -- not an error, not another document's chunks."""
+
+    chunks = [_chunk(1, document_id=uuid4())]  # belongs to a different document
+    unrelated_document = uuid4()
+
+    repository = FakeRepository(chunks)
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    results = await service.search(
+        "query",
+        limit=10,
+        candidate_limit=10,
+        document_id=unrelated_document,
+    )
+
+    assert results == []
+
+
+@pytest.mark.asyncio
+async def test_document_filter_does_not_exclude_the_selected_documents_valid_chunks() -> None:
+    """Multiple valid chunks belonging to the selected document must all
+    survive the filter -- it must never accidentally over-exclude."""
+
+    target_document = uuid4()
+    chunks = [
+        _chunk(1, document_id=target_document),
+        _chunk(2, document_id=target_document),
+        _chunk(3, document_id=uuid4()),
+    ]
+
+    repository = FakeRepository(chunks)
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    results = await service.search(
+        "query",
+        limit=10,
+        candidate_limit=10,
+        document_id=target_document,
+    )
+
+    assert {r.content for r in results} == {"chunk 1", "chunk 2"}
+    assert all(r.document_id == target_document for r in results)
+
+
+@pytest.mark.asyncio
+async def test_section_filter_still_behaves_correctly() -> None:
+    """Section filtering must continue to work independently of (and
+    unaffected by) the document-filter fix."""
+
+    target_section = uuid4()
+    chunks = [
+        _chunk(1, section_id=target_section),
+        _chunk(2, section_id=uuid4()),
+    ]
+
+    repository = FakeRepository(chunks)
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    results = await service.search(
+        "query",
+        limit=10,
+        candidate_limit=10,
+        section_id=target_section,
+    )
+
+    assert repository.received_section_id == target_section
+    assert len(results) == 1
+    assert results[0].content == "chunk 1"
+    assert results[0].section_id == target_section
+
+
+@pytest.mark.asyncio
+async def test_combined_document_and_section_filter_both_apply() -> None:
+    target_document = uuid4()
+    target_section = uuid4()
+    chunks = [
+        _chunk(1, document_id=target_document, section_id=target_section),
+        _chunk(2, document_id=target_document, section_id=uuid4()),
+        _chunk(3, document_id=uuid4(), section_id=target_section),
+    ]
+
+    repository = FakeRepository(chunks)
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    results = await service.search(
+        "query",
+        limit=10,
+        candidate_limit=10,
+        document_id=target_document,
+        section_id=target_section,
+    )
+
+    assert len(results) == 1
+    assert results[0].content == "chunk 1"
