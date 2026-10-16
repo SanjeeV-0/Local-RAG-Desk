@@ -20,7 +20,7 @@ not a per-role choice.
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -168,6 +168,18 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_app_name: str = "Production AI Research & Knowledge Agent"
 
+    # Legacy, single-model configuration name from before generation and
+    # decomposition had independent model settings. Deliberately NOT read
+    # directly by any provider -- it only ever reaches
+    # `openrouter_generation_model` via `_apply_legacy_openrouter_model_fallback`
+    # below, and only when `OPENROUTER_GENERATION_MODEL` itself is unset.
+    # `OPENROUTER_DECOMPOSITION_MODEL` is never affected by this: it keeps
+    # its own independent default regardless of whether this legacy variable
+    # is set. New deployments should set `OPENROUTER_GENERATION_MODEL`
+    # directly; this exists only so an existing `OPENROUTER_MODEL=...` in a
+    # deployed `.env` keeps working rather than being silently ignored.
+    openrouter_model: str | None = None
+
     # Shared OpenAI-compatible CLIENT settings -- both
     # OpenRouterQueryDecompositionProvider and OpenRouterGenerationProvider
     # construct their `AsyncOpenAI` client identically, so these describe
@@ -262,7 +274,9 @@ class Settings(BaseSettings):
     # different ways) and inconsistent answer quality. Pin to one verified,
     # general-purpose, instruction-capable free model instead; override via
     # `OPENROUTER_GENERATION_MODEL` in the environment if a different model
-    # is preferred.
+    # is preferred. `OPENROUTER_MODEL` (legacy) is also honored as a
+    # fallback when `OPENROUTER_GENERATION_MODEL` itself is not set -- see
+    # `openrouter_model` and `_apply_legacy_openrouter_model_fallback` above.
     openrouter_generation_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
     openrouter_generation_temperature: float = 0.2
     # Bounded (not `None`/unbounded) -- some free-tier models (including the
@@ -357,6 +371,33 @@ class Settings(BaseSettings):
     # Ambiguous cases still fall through to decomposition either way -- this
     # flag only ever removes decomposition calls, never adds them.
     query_router_enabled: bool = False
+
+    @model_validator(mode="after")
+    def _apply_legacy_openrouter_model_fallback(self) -> "Settings":
+        """Precedence for the answer-generation model:
+
+        1. `OPENROUTER_GENERATION_MODEL`, if explicitly set -- always wins.
+        2. `OPENROUTER_MODEL` (legacy), if set and (1) is not.
+        3. The compiled-in default (`openrouter_generation_model`'s own
+           field default) otherwise.
+
+        `model_fields_set` (not just "is the value non-default") is what
+        this checks `openrouter_generation_model` against -- it reflects
+        whether `OPENROUTER_GENERATION_MODEL` was actually provided (by the
+        environment, `.env`, or a direct keyword argument), so an explicit
+        setting that happens to match the compiled-in default still counts
+        as "explicitly set" and is never silently overridden by the legacy
+        variable.
+
+        `openrouter_decomposition_model` is never touched here -- it keeps
+        its own independent default/override regardless of this legacy
+        variable, exactly as before this fallback was added.
+        """
+
+        if "openrouter_generation_model" not in self.model_fields_set and self.openrouter_model:
+            self.openrouter_generation_model = self.openrouter_model
+
+        return self
 
     model_config = SettingsConfigDict(
         env_file=".env",

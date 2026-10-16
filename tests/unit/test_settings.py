@@ -134,6 +134,88 @@ def test_openrouter_generation_max_tokens_defaults_to_a_bounded_value() -> None:
     assert default_max_tokens > 0
 
 
+def test_openrouter_generation_model_default_when_nothing_configured() -> None:
+    """Neither `OPENROUTER_GENERATION_MODEL` nor legacy `OPENROUTER_MODEL`
+    set -- the compiled-in default must be used, unchanged."""
+
+    settings = _settings()
+
+    assert settings.openrouter_generation_model == "nvidia/nemotron-3-super-120b-a12b:free"
+
+
+def test_legacy_openrouter_model_is_used_as_generation_fallback_when_unset() -> None:
+    """Regression: a deployed `.env` using the legacy, pre-split
+    `OPENROUTER_MODEL` variable name must not be silently ignored -- it
+    should still configure the generation model when
+    `OPENROUTER_GENERATION_MODEL` itself is not set."""
+
+    settings = _settings(openrouter_model="legacy-vendor/legacy-model:free")
+
+    assert settings.openrouter_generation_model == "legacy-vendor/legacy-model:free"
+
+
+def test_explicit_generation_model_takes_precedence_over_legacy_variable() -> None:
+    """`OPENROUTER_GENERATION_MODEL` must always win over the legacy
+    `OPENROUTER_MODEL`, even when both are configured."""
+
+    settings = _settings(
+        openrouter_model="legacy-vendor/legacy-model:free",
+        openrouter_generation_model="explicit-vendor/explicit-model:free",
+    )
+
+    assert settings.openrouter_generation_model == "explicit-vendor/explicit-model:free"
+
+
+def test_explicit_generation_model_matching_default_is_not_overridden_by_legacy() -> None:
+    """Edge case: an explicitly configured `OPENROUTER_GENERATION_MODEL`
+    that happens to equal the compiled-in default must still be treated as
+    explicitly set -- `model_fields_set`, not a value comparison, is what
+    this precedence relies on."""
+
+    default_model = _settings().openrouter_generation_model
+
+    settings = _settings(
+        openrouter_model="legacy-vendor/legacy-model:free",
+        openrouter_generation_model=default_model,
+    )
+
+    assert settings.openrouter_generation_model == default_model
+
+
+def test_legacy_openrouter_model_does_not_affect_decomposition_model() -> None:
+    """`OPENROUTER_DECOMPOSITION_MODEL` must remain fully independent of the
+    legacy `OPENROUTER_MODEL` fallback -- it keeps its own default/override
+    regardless of whether the legacy variable is set."""
+
+    settings = _settings(openrouter_model="legacy-vendor/legacy-model:free")
+
+    assert settings.openrouter_decomposition_model == "openrouter/free"
+
+
+def test_explicit_decomposition_model_is_unaffected_by_legacy_variable() -> None:
+    settings = _settings(
+        openrouter_model="legacy-vendor/legacy-model:free",
+        openrouter_decomposition_model="decomposer-vendor/decomposer-model:free",
+    )
+
+    assert settings.openrouter_decomposition_model == "decomposer-vendor/decomposer-model:free"
+    # The legacy variable still only ever reaches generation's model.
+    assert settings.openrouter_generation_model == "legacy-vendor/legacy-model:free"
+
+
+def test_openrouter_model_env_var_name_resolves_the_legacy_field(monkeypatch) -> None:
+    """Confirms the legacy fallback is actually reachable via the real
+    `OPENROUTER_MODEL` environment variable name (case-insensitive, matching
+    every other setting's convention), not just via the Python keyword
+    argument used by the other tests in this file."""
+
+    monkeypatch.setenv("OPENROUTER_MODEL", "env-vendor/env-model:free")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.openrouter_generation_model == "env-vendor/env-model:free"
+
+
 def test_openrouter_max_retries_default_matches_sdk_default() -> None:
     assert _settings().openrouter_max_retries == 2
 
