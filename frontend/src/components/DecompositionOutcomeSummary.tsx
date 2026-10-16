@@ -97,32 +97,45 @@ export const DecompositionOutcomeSummary: React.FC<DecompositionOutcomeSummaryPr
         </div>
       )}
 
-      {outcome.status === 'decomposed' && (
-        <>
-          <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>
-            The decomposer split this query into{' '}
-            <strong style={{ color: '#818cf8' }}>{outcome.sub_queries.length}</strong> retrieval
-            sub-queries, each run independently and merged:
-          </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
-            {outcome.sub_queries.map((subQuery, idx) => (
-              <span
-                key={idx}
-                style={{
-                  fontSize: '0.75rem',
-                  color: '#a5b4fc',
-                  background: 'rgba(99, 102, 241, 0.12)',
-                  border: '1px solid rgba(99, 102, 241, 0.25)',
-                  padding: '0.25rem 0.6rem',
-                  borderRadius: 9999,
-                }}
-              >
-                {subQuery}
-              </span>
-            ))}
-          </div>
-        </>
-      )}
+      {outcome.status === 'decomposed' &&
+        (() => {
+          // `sub_queries` always includes the original query (the decomposer
+          // guarantees it is present, first, and never dropped by
+          // deduplication) -- it is already shown above as "Original
+          // query", so it must not also be listed here as if it were an
+          // additional, useful subquery the decomposer came up with.
+          const additionalSubQueries = outcome.sub_queries.filter(
+            (subQuery) => subQuery.trim().toLowerCase() !== outcome.original_query.trim().toLowerCase()
+          );
+
+          return (
+            <>
+              <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>
+                The decomposer split this query into the original query plus{' '}
+                <strong style={{ color: '#818cf8' }}>{additionalSubQueries.length}</strong>{' '}
+                additional retrieval sub-{additionalSubQueries.length === 1 ? 'query' : 'queries'},
+                each run independently and merged:
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
+                {additionalSubQueries.map((subQuery, idx) => (
+                  <span
+                    key={idx}
+                    style={{
+                      fontSize: '0.75rem',
+                      color: '#a5b4fc',
+                      background: 'rgba(99, 102, 241, 0.12)',
+                      border: '1px solid rgba(99, 102, 241, 0.25)',
+                      padding: '0.25rem 0.6rem',
+                      borderRadius: 9999,
+                    }}
+                  >
+                    {subQuery}
+                  </span>
+                ))}
+              </div>
+            </>
+          );
+        })()}
     </div>
   );
 };

@@ -19,15 +19,43 @@ const API_BASE = (import.meta as any).env?.VITE_API_BASE_URL || '';
 /**
  * Helper to handle fetch responses and extract meaningful FastAPI error details
  */
+/**
+ * Shape of the `detail` body FastAPI returns for a classified provider
+ * failure (see `app.generation.errors.ProviderUnavailableError` and its use
+ * in `app.api.research.ask`) -- a safe category and human-readable message,
+ * never the raw provider response/exception.
+ */
+interface ProviderErrorDetail {
+  error: {
+    category: string;
+    retryable: boolean;
+    message: string;
+  };
+}
+
+function isProviderErrorDetail(detail: unknown): detail is ProviderErrorDetail {
+  return (
+    typeof detail === 'object' &&
+    detail !== null &&
+    'error' in detail &&
+    typeof (detail as any).error?.message === 'string'
+  );
+}
+
 async function handleResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     let errorMessage = `HTTP ${response.status} (${response.statusText})`;
     try {
       const errorData = await response.json();
-      if (errorData?.detail) {
-        errorMessage = typeof errorData.detail === 'string'
-          ? errorData.detail
-          : JSON.stringify(errorData.detail);
+      if (isProviderErrorDetail(errorData?.detail)) {
+        // A readable message plus its safe category -- never the raw
+        // provider response body or exception text, and never rendered as
+        // stringified JSON.
+        errorMessage = `${errorData.detail.error.message} (${errorData.detail.error.category})`;
+      } else if (typeof errorData?.detail === 'string') {
+        errorMessage = errorData.detail;
+      } else if (errorData?.detail) {
+        errorMessage = JSON.stringify(errorData.detail);
       }
     } catch {
       // Fall back to status text

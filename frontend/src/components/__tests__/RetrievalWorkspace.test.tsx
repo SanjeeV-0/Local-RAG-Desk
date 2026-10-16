@@ -49,6 +49,12 @@ const SUCCESSFUL_RESPONSE: RetrievalSearchResponse = {
     status: 'not_needed',
     reason: null,
   },
+  redaction: {
+    redaction_applied: false,
+    affected_source_count: 0,
+    answer_redacted: false,
+    possibly_incomplete: false,
+  },
   trace_requested: false,
   trace_available: false,
   trace_unavailable_reason: null,
@@ -403,7 +409,12 @@ describe('RetrievalWorkspace document selector', () => {
     await waitFor(() => expect(screen.getByText('No documents found.')).toBeInTheDocument());
   });
 
-  it('sends the selected document_id, and clearing the selection omits it', async () => {
+  it('sends the selected document_id as the CURRENT VERSION id, not the logical document id, and clearing the selection omits it', async () => {
+    // Regression: the backend's `document_id` filter matches
+    // `DocumentChunk.document_id`, a foreign key to the per-version
+    // `Document.id` -- never `logical_document_id`. Sending the logical id
+    // (as this component previously did) meant every filtered search
+    // silently returned zero results.
     const user = userEvent.setup();
     vi.mocked(listDocuments).mockResolvedValueOnce([DOC_READY]);
     const mocked = vi.mocked(searchRetrievedChunks);
@@ -417,14 +428,16 @@ describe('RetrievalWorkspace document selector', () => {
     );
 
     const select = screen.getByDisplayValue('— All documents (no filter) —');
-    await user.selectOptions(select, 'doc-aaa');
+    await user.selectOptions(select, 'version-aaa');
 
     const textarea = screen.getByPlaceholderText(/Enter search query/i);
     await user.type(textarea, 'a query');
     await user.click(screen.getByRole('button', { name: /Execute Vector Retrieval/i }));
 
     await waitFor(() => expect(mocked).toHaveBeenCalledTimes(1));
-    expect(mocked.mock.calls[0][0]).toMatchObject({ document_id: 'doc-aaa' });
+    expect(mocked.mock.calls[0][0]).toMatchObject({ document_id: 'version-aaa' });
+    // Never the logical grouping id -- that would silently match nothing.
+    expect(mocked.mock.calls[0][0]).not.toMatchObject({ document_id: 'doc-aaa' });
 
     // Clear the selection back to "All documents" and search again.
     await user.selectOptions(select, '— All documents (no filter) —');
@@ -432,6 +445,29 @@ describe('RetrievalWorkspace document selector', () => {
 
     await waitFor(() => expect(mocked).toHaveBeenCalledTimes(2));
     expect(mocked.mock.calls[1][0]).not.toHaveProperty('document_id');
+  });
+
+  it('disables selecting a document with no current version (nothing to filter to)', async () => {
+    const DOC_NO_CURRENT_VERSION: LogicalDocumentSummary = {
+      logical_document_id: 'doc-no-version',
+      current_version: null,
+    };
+
+    const user = userEvent.setup();
+    vi.mocked(listDocuments).mockResolvedValueOnce([DOC_READY, DOC_NO_CURRENT_VERSION]);
+
+    render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
+    await openAdvancedFilters(user);
+
+    await waitFor(() =>
+      expect(screen.getByText(/no current version -- unavailable for filtering/)).toBeInTheDocument(),
+    );
+
+    const option = screen.getByText(
+      /Untitled document \(no current version -- unavailable for filtering\)/,
+    ) as HTMLOptionElement;
+    expect(option.disabled).toBe(true);
+    expect(option.value).toBe('');
   });
 });
 

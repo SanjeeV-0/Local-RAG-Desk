@@ -24,6 +24,7 @@ import { listDocuments, DocumentApiUnavailableError } from '../api/documents';
 import { LogicalDocumentSummary } from '../types/document';
 import { useCancellableRequest } from '../hooks/useCancellableRequest';
 import { DecompositionOutcomeSummary } from './DecompositionOutcomeSummary';
+import { RedactionWarningBanner } from './RedactionWarningBanner';
 import {
   Search,
   Layers,
@@ -124,6 +125,18 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
   // same title -- version number and non-READY status are only appended
   // when they actually help disambiguate, so the common case (one READY
   // version, unique title) stays a plain, uncluttered title.
+  //
+  // `id` is the CURRENT VERSION's id (`doc.current_version.id`), NOT
+  // `doc.logical_document_id` -- verified against the backend contract:
+  // `POST /retrieval/search`'s `document_id` filters
+  // `DocumentChunk.document_id`, a foreign key to the per-version
+  // `Document.id` (see `DocumentRepository.search_similar_chunks` and its
+  // tests), never the logical grouping id. Sending `logical_document_id`
+  // here -- a value that never equals any chunk's `document_id` -- was why
+  // selecting a specific document always returned zero results, while the
+  // unfiltered (no document_id) search worked fine. A document with no
+  // current version has nothing to filter to, so it is kept visible (for
+  // information) but not selectable.
   const documentOptions = useMemo(() => {
     const titleCounts = new Map<string, number>();
     for (const doc of documents) {
@@ -137,7 +150,7 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
 
       let label = title;
       if (!doc.current_version) {
-        label += ` (no current version -- ${doc.logical_document_id.slice(0, 8)})`;
+        label += ` (no current version -- unavailable for filtering)`;
       } else {
         if (isDuplicateTitle) {
           label += ` (v${doc.current_version.version_number})`;
@@ -148,8 +161,10 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
       }
 
       return {
-        id: doc.logical_document_id,
+        key: doc.logical_document_id,
+        id: doc.current_version?.id ?? '',
         label,
+        selectable: !!doc.current_version,
         searchText: `${title} ${doc.logical_document_id}`.toLowerCase(),
       };
     });
@@ -380,7 +395,7 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
                 >
                   <option value="">— All documents (no filter) —</option>
                   {filteredDocumentOptions.map((opt) => (
-                    <option key={opt.id} value={opt.id}>
+                    <option key={opt.key} value={opt.id} disabled={!opt.selectable}>
                       {opt.label}
                     </option>
                   ))}
@@ -502,6 +517,12 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
             <h4 className="error-title">Retrieval API Error</h4>
             <p className="error-desc">{error}</p>
           </div>
+        </div>
+      )}
+
+      {response?.redaction?.possibly_incomplete && (
+        <div style={{ marginBottom: '1.5rem' }}>
+          <RedactionWarningBanner redaction={response.redaction} />
         </div>
       )}
 

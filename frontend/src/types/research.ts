@@ -127,11 +127,62 @@ export interface DecompositionOutcome {
   reason: string | null;
 }
 
+/**
+ * Always-present summary of whether sensitive (PII-shaped) content was
+ * redacted or withheld for this request -- present on EVERY successful
+ * response from both POST /research/ask and POST /retrieval/search. A
+ * response with `possibly_incomplete: true` must never be presented to the
+ * user as a guaranteed-complete answer -- some source content or part of
+ * the generated answer may have been withheld.
+ *
+ * Detection is rule-based (email, phone, dashed SSN, Luhn-validated card
+ * numbers) and does not catch every form of sensitive information -- this
+ * is a best-effort privacy safeguard, not a comprehensive one.
+ */
+export interface RedactionOutcome {
+  redaction_applied: boolean;
+  affected_source_count: number;
+  answer_redacted: boolean;
+  possibly_incomplete: boolean;
+}
+
+/**
+ * Safe, category-classified provider failure reported in a partial
+ * response -- see `app.generation.errors.ProviderUnavailableError`. Never
+ * contains the raw provider response body or exception text.
+ */
+export interface GenerationError {
+  category: string;
+  retryable: boolean;
+  message: string;
+}
+
 export interface ResearchResponse {
-  answer: string;
-  model: string;
+  // `null` exactly when `partial` is true: generation was rejected/failed
+  // but retrieval already found safe, usable sources -- see
+  // `generation_error` for why, and `sources`/`decomposition` for what was
+  // still safely recovered.
+  answer: string | null;
+  model: string | null;
   sources: Source[];
   decomposition: DecompositionOutcome;
+  redaction: RedactionOutcome;
+  // True when generation could not produce an answer (a classified provider
+  // failure) but retrieval/decomposition already succeeded -- `sources` and
+  // `decomposition` are still a safe, complete result in that case. Always
+  // present and `false` on a normal response.
+  partial: boolean;
+  // How `answer` was produced:
+  //  - "generated": the normal path -- an LLM-generated answer.
+  //  - "extractive_fallback": generation failed, but a local, deterministic
+  //    extractive summary of the already-redacted retrieved sources was
+  //    built instead (no provider call) -- `answer` is non-null but is NOT
+  //    LLM-generated and must be labeled as such, never presented as a
+  //    normal generated answer.
+  //  - "unavailable": generation failed and no safe extractive summary
+  //    could be built either -- `answer` is null.
+  answer_method: 'generated' | 'extractive_fallback' | 'unavailable';
+  generation_error?: GenerationError;
   trace_requested: boolean;
   trace_available: boolean;
   trace_unavailable_reason: TraceUnavailableReason | null;
@@ -178,6 +229,7 @@ export interface RetrievedChunkResponse {
 export interface RetrievalSearchResponse {
   results: RetrievedChunkResponse[];
   decomposition: DecompositionOutcome;
+  redaction: RedactionOutcome;
   trace_requested: boolean;
   trace_available: boolean;
   trace_unavailable_reason: TraceUnavailableReason | null;
