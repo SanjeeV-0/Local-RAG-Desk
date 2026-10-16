@@ -249,9 +249,27 @@ class Settings(BaseSettings):
 
     # Answer generation LLM configuration -- independent of query
     # decomposition's settings above; see the matching comment there.
-    openrouter_generation_model: str = "openrouter/free"
+    #
+    # `openrouter_generation_model` is deliberately a single, concrete
+    # OpenRouter model id, NOT the "openrouter/free" auto-routing alias --
+    # live verification (safe diagnostic calls, no content sent) showed that
+    # alias resolves to a DIFFERENT underlying free model on nearly every
+    # request (observed across one session: general chat/MoE models, a
+    # coding-specific agent, and even a 4B-parameter content-safety
+    # CLASSIFIER model entirely unsuited to producing a research answer).
+    # That non-determinism explains both inconsistent generation failures
+    # (different sub-providers/models behind the alias can fail in
+    # different ways) and inconsistent answer quality. Pin to one verified,
+    # general-purpose, instruction-capable free model instead; override via
+    # `OPENROUTER_GENERATION_MODEL` in the environment if a different model
+    # is preferred.
+    openrouter_generation_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
     openrouter_generation_temperature: float = 0.2
-    openrouter_generation_max_tokens: int | None = None
+    # Bounded (not `None`/unbounded) -- some free-tier models (including the
+    # pinned default above) are reasoning models that can run very long, or
+    # even time out, with no cap; a bounded budget also leaves enough room
+    # for a structured, multi-part answer without an indefinite wait.
+    openrouter_generation_max_tokens: int | None = 2048
     openrouter_generation_top_p: float = 1.0
     openrouter_generation_response_format: dict[str, object] | None = None
     openrouter_generation_reasoning_effort: str | None = None

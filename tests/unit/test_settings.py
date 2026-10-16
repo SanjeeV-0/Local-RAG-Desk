@@ -109,6 +109,31 @@ def test_openrouter_timeout_seconds_rejects_non_positive_values(value: float) ->
         _settings(openrouter_timeout_seconds=value)
 
 
+def test_openrouter_generation_model_defaults_away_from_unstable_free_alias() -> None:
+    """Regression: `"openrouter/free"` is an undocumented auto-routing
+    alias, verified (via live, safe diagnostic calls) to resolve to a
+    different underlying model on nearly every request -- including models
+    entirely unsuited to producing a research answer (e.g. a content-safety
+    classifier model). The default must be a single, concrete model id."""
+
+    default_model = _settings().openrouter_generation_model
+
+    assert default_model != "openrouter/free"
+    assert default_model  # non-empty
+
+
+def test_openrouter_generation_max_tokens_defaults_to_a_bounded_value() -> None:
+    """Regression: an unbounded (`None`) token budget combined with a
+    reasoning-style free-tier model risks very long generations or timeouts
+    -- verified directly against a live model. The default must be a
+    concrete, positive bound."""
+
+    default_max_tokens = _settings().openrouter_generation_max_tokens
+
+    assert default_max_tokens is not None
+    assert default_max_tokens > 0
+
+
 def test_openrouter_max_retries_default_matches_sdk_default() -> None:
     assert _settings().openrouter_max_retries == 2
 
