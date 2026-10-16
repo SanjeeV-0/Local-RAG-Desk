@@ -124,13 +124,18 @@ async def test_generation_creates_langfuse_observation(
     assert observation.name == "answer-generation"
     assert observation.observation_type == "generation"
 
+    # Raw context is never sent to Langfuse -- only safe, non-content
+    # metadata (see app.generation.generation_service.GenerationService).
     assert observation.input_data == {
         "query": "What is RAG?",
-        "context": "",
+        "context_length": 0,
+        "source_count": 0,
+        "redacted_source_count": 0,
     }
 
     assert observation.output == {
         "text": "Generated answer.",
+        "answer_redacted": False,
         "model": "fake-model",
         "usage": {
             "input_tokens": 100,
