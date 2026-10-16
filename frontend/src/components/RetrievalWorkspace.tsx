@@ -69,7 +69,15 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
   const [query, setQuery] = useState('');
   const [limit, setLimit] = useState(10);
   const [candidateLimitInput, setCandidateLimitInput] = useState('');
-  const [selectedDocumentId, setSelectedDocumentId] = useState(initialDocumentId || '');
+  // `initialDocumentId` is NOT used directly here -- it can arrive as either
+  // id kind depending on where navigation came from (a per-version id from
+  // "Inspect Doc" on a retrieval/research result, or a logical document id
+  // from "Search This Doc" in the Document Library -- see the resolution
+  // effect below, once `documents` has loaded). Seeding state with the raw
+  // value would send a logical id straight to `/retrieval/search`'s
+  // `document_id` filter in the "Search This Doc" case, reproducing the
+  // same zero-results bug `documentOptions` below was already fixed for.
+  const [selectedDocumentId, setSelectedDocumentId] = useState('');
   const [documentFilterText, setDocumentFilterText] = useState('');
   const [sectionIdFilter, setSectionIdFilter] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(!!initialDocumentId);
@@ -120,6 +128,35 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
       cancelled = true;
     };
   }, []);
+
+  // Resolves `initialDocumentId` (if provided) to the CURRENT VERSION id
+  // `documentOptions`/the `document_id` filter actually need, once the
+  // document list has loaded. Matches on either id kind -- the same
+  // dual-match `DocumentWorkspace` already uses for its own
+  // `initialDocumentId` -- so this keeps working whether the navigation
+  // source sent a per-version id ("Inspect Doc") or a logical document id
+  // ("Search This Doc"). A match with no current version has nothing to
+  // filter to and is left unfiltered ("All documents") rather than ever
+  // assigning a logical id as though it were a version id. Runs once per
+  // mount (RetrievalWorkspace remounts on every navigation into this tab --
+  // see ResearchPage's conditional rendering -- so `initialDocumentId`
+  // never changes out from under an already-resolved selection).
+  useEffect(() => {
+    if (!initialDocumentId || documentsLoading) return;
+
+    const match = documents.find(
+      (doc) =>
+        doc.logical_document_id === initialDocumentId ||
+        doc.current_version?.id === initialDocumentId
+    );
+
+    if (match?.current_version) {
+      setSelectedDocumentId(match.current_version.id);
+    }
+    // No match, or a match with no current version: leave the filter
+    // cleared ("All documents") -- never assign `initialDocumentId` itself
+    // as a fallback, since it may be a logical id.
+  }, [initialDocumentId, documents, documentsLoading]);
 
   // Builds a label that stays useful even when several documents share the
   // same title -- version number and non-READY status are only appended

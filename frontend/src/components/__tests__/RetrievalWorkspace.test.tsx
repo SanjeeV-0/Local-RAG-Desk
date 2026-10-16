@@ -471,6 +471,123 @@ describe('RetrievalWorkspace document selector', () => {
   });
 });
 
+describe('RetrievalWorkspace initialDocumentId resolution ("Search This Doc" / "Inspect Doc")', () => {
+  it('resolves a logical document id ("Search This Doc") to the current version id and sends it as the filter', async () => {
+    // Regression: DocumentWorkspace's "Search This Doc" button navigates
+    // here with `selectedDocument.logical_document_id` (a logical id), not
+    // a version id -- previously this was used as `selectedDocumentId`
+    // unresolved, so the request sent a logical id as `document_id`, which
+    // never matches any chunk and silently returned zero results.
+    const user = userEvent.setup();
+    vi.mocked(listDocuments).mockResolvedValueOnce([DOC_READY]);
+    const mocked = vi.mocked(searchRetrievedChunks);
+    mocked.mockResolvedValue(SUCCESSFUL_RESPONSE);
+
+    render(
+      <RetrievalWorkspace
+        traceEnabled={false}
+        routerEnabled={false}
+        initialDocumentId="doc-aaa" // DOC_READY.logical_document_id
+      />,
+    );
+
+    // The dropdown must reflect the resolved document once documents load.
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Vector Search Fundamentals')).toBeInTheDocument(),
+    );
+
+    const textarea = screen.getByPlaceholderText(/Enter search query/i);
+    await user.type(textarea, 'a query');
+    await user.click(screen.getByRole('button', { name: /Execute Vector Retrieval/i }));
+
+    await waitFor(() => expect(mocked).toHaveBeenCalledTimes(1));
+    // The request must carry the CURRENT VERSION id, never the logical id.
+    expect(mocked.mock.calls[0][0]).toMatchObject({ document_id: 'version-aaa' });
+    expect(mocked.mock.calls[0][0]).not.toMatchObject({ document_id: 'doc-aaa' });
+  });
+
+  it('still resolves a per-version id ("Inspect Doc") the same way it always did', async () => {
+    const user = userEvent.setup();
+    vi.mocked(listDocuments).mockResolvedValueOnce([DOC_READY]);
+    const mocked = vi.mocked(searchRetrievedChunks);
+    mocked.mockResolvedValue(SUCCESSFUL_RESPONSE);
+
+    render(
+      <RetrievalWorkspace
+        traceEnabled={false}
+        routerEnabled={false}
+        initialDocumentId="version-aaa" // DOC_READY.current_version.id
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Vector Search Fundamentals')).toBeInTheDocument(),
+    );
+
+    const textarea = screen.getByPlaceholderText(/Enter search query/i);
+    await user.type(textarea, 'a query');
+    await user.click(screen.getByRole('button', { name: /Execute Vector Retrieval/i }));
+
+    await waitFor(() => expect(mocked).toHaveBeenCalledTimes(1));
+    expect(mocked.mock.calls[0][0]).toMatchObject({ document_id: 'version-aaa' });
+  });
+
+  it('leaves the filter cleared (never assigns a logical id as a version id) when the target has no current version', async () => {
+    const DOC_NO_CURRENT_VERSION: LogicalDocumentSummary = {
+      logical_document_id: 'doc-no-version',
+      current_version: null,
+    };
+
+    const user = userEvent.setup();
+    vi.mocked(listDocuments).mockResolvedValueOnce([DOC_NO_CURRENT_VERSION]);
+    const mocked = vi.mocked(searchRetrievedChunks);
+    mocked.mockResolvedValue(SUCCESSFUL_RESPONSE);
+
+    render(
+      <RetrievalWorkspace
+        traceEnabled={false}
+        routerEnabled={false}
+        initialDocumentId="doc-no-version"
+      />,
+    );
+
+    await waitFor(() => expect(listDocuments).toHaveBeenCalled());
+
+    const textarea = screen.getByPlaceholderText(/Enter search query/i);
+    await user.type(textarea, 'a query');
+    await user.click(screen.getByRole('button', { name: /Execute Vector Retrieval/i }));
+
+    await waitFor(() => expect(mocked).toHaveBeenCalledTimes(1));
+    // No safe id to filter by -- the request must not carry `document_id`
+    // at all (never the logical id substituted in its place).
+    expect(mocked.mock.calls[0][0]).not.toHaveProperty('document_id');
+  });
+
+  it('leaves the filter cleared when the navigation target matches no known document', async () => {
+    const user = userEvent.setup();
+    vi.mocked(listDocuments).mockResolvedValueOnce([DOC_READY]);
+    const mocked = vi.mocked(searchRetrievedChunks);
+    mocked.mockResolvedValue(SUCCESSFUL_RESPONSE);
+
+    render(
+      <RetrievalWorkspace
+        traceEnabled={false}
+        routerEnabled={false}
+        initialDocumentId="some-unrelated-id"
+      />,
+    );
+
+    await waitFor(() => expect(listDocuments).toHaveBeenCalled());
+
+    const textarea = screen.getByPlaceholderText(/Enter search query/i);
+    await user.type(textarea, 'a query');
+    await user.click(screen.getByRole('button', { name: /Execute Vector Retrieval/i }));
+
+    await waitFor(() => expect(mocked).toHaveBeenCalledTimes(1));
+    expect(mocked.mock.calls[0][0]).not.toHaveProperty('document_id');
+  });
+});
+
 describe('RetrievalWorkspace candidate-limit control', () => {
   it('sends an explicit candidate_limit when set', async () => {
     const user = userEvent.setup();
