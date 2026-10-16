@@ -125,6 +125,35 @@ class RetrievalTraceResponse(BaseModel):
     router_bypassed: bool
 
 
+class DecompositionOutcomeResponse(BaseModel):
+    """Always-present summary of what query decomposition actually did for
+    this request -- present on every successful response regardless of
+    `trace`/`Settings.trace_enabled`, unlike `RetrievalTraceResponse` (full
+    candidate/score diagnostics, trace-gated only).
+
+    `status`:
+      - `"bypassed"`: the deterministic query router decided this query was
+        confidently single-intent and skipped the decomposer entirely.
+      - `"decomposed"`: the decomposer ran and produced more than one
+        retrieval sub-query.
+      - `"not_needed"`: the decomposer ran and decided a single sub-query
+        was sufficient (or no decomposer was configured at all).
+      - `"fallback"`: the decomposer ran, the underlying provider/parsing
+        failed, and retrieval fell back to the original query alone.
+        `reason` is a safe, generic, user-facing message in this case --
+        never the raw exception text.
+
+    `sub_queries` is the actual, real, order-preserved list of queries used
+    for retrieval -- identical to `RetrievalTraceResponse.sub_queries` when
+    a trace is also available, but present here independent of tracing.
+    """
+
+    original_query: str
+    sub_queries: list[str]
+    status: Literal["bypassed", "decomposed", "not_needed", "fallback"]
+    reason: str | None = None
+
+
 class RetrievalSearchResponse(BaseModel):
     """Response payload for vector retrieval.
 
@@ -135,9 +164,13 @@ class RetrievalSearchResponse(BaseModel):
     `trace` is populated. `trace_unavailable_reason` is `"server_disabled"`
     when trace was requested but `Settings.trace_enabled` is false, and
     `None` otherwise (including when trace wasn't requested at all).
+
+    `decomposition` is always present (independent of `trace`/
+    `trace_available`) -- see `DecompositionOutcomeResponse`.
     """
 
     results: list[RetrievedChunkResponse]
+    decomposition: DecompositionOutcomeResponse
     trace_requested: bool
     trace_available: bool
     trace_unavailable_reason: Literal["server_disabled"] | None = None

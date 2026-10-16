@@ -23,6 +23,7 @@ import { searchRetrievedChunks } from '../api/research';
 import { listDocuments, DocumentApiUnavailableError } from '../api/documents';
 import { LogicalDocumentSummary } from '../types/document';
 import { useCancellableRequest } from '../hooks/useCancellableRequest';
+import { DecompositionOutcomeSummary } from './DecompositionOutcomeSummary';
 import {
   Search,
   Layers,
@@ -501,6 +502,18 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
             <h4 className="error-title">Retrieval API Error</h4>
             <p className="error-desc">{error}</p>
           </div>
+        </div>
+      )}
+
+      {/* Always-visible query decomposition outcome -- present on every
+          completed response regardless of Trace Mode. Only rendered when
+          the fuller, trace-gated "Query Decomposition" card below is NOT
+          available, so the two are never shown at once; when tracing is
+          available, that richer card (candidate/dedup counts included)
+          takes over. */}
+      {response?.decomposition && !response.trace_available && (
+        <div className="glass-card" style={{ padding: '1.25rem 1.5rem', marginBottom: '1.5rem' }}>
+          <DecompositionOutcomeSummary outcome={response.decomposition} />
         </div>
       )}
 

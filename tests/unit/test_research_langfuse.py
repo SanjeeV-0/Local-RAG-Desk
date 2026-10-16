@@ -3,16 +3,27 @@ import pytest
 from app.api.research import _execute_research
 from app.generation.context import GenerationContext
 from app.generation.generation_service import GenerationResult
+from app.retrieval.decomposition_outcome import DecompositionOutcome
 from app.retrieval.models import RetrievedChunk
 
 
 class FakeRetrievalService:
+    def __init__(self) -> None:
+        self.last_decomposition_outcome: DecompositionOutcome | None = None
+
     async def search(
         self,
         query: str,
         limit: int = 10,
         **kwargs,
     ) -> list[RetrievedChunk]:
+        # Always set, exactly like the real `RetrievalService._search`.
+        self.last_decomposition_outcome = DecompositionOutcome(
+            original_query=query,
+            sub_queries=[query],
+            status="not_needed",
+        )
+
         return [
             RetrievedChunk(
                 document_id=__import__("uuid").uuid4(),

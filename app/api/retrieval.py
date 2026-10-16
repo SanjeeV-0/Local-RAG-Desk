@@ -17,6 +17,7 @@ from app.core.dependencies import (
     get_retrieval_service,
 )
 from app.retrieval.schemas import (
+    DecompositionOutcomeResponse,
     RetrievalSearchRequest,
     RetrievalSearchResponse,
     RetrievalTraceCandidateResponse,
@@ -85,6 +86,15 @@ async def search(
         candidate_limit=request.candidate_limit,
     )
 
+    # Always set by `RetrievalService._search` on every call that reaches
+    # the decomposition decision point -- independent of `trace`/
+    # `effective_trace`, so this is present on every successful response.
+    decomposition_outcome = retrieval_service.last_decomposition_outcome
+    assert decomposition_outcome is not None, (
+        "RetrievalService.search() must always set last_decomposition_outcome "
+        "before returning successfully."
+    )
+
     trace_response = None
 
     trace = retrieval_service.last_trace
@@ -130,6 +140,12 @@ async def search(
             )
             for result in results
         ],
+        decomposition=DecompositionOutcomeResponse(
+            original_query=decomposition_outcome.original_query,
+            sub_queries=decomposition_outcome.sub_queries,
+            status=decomposition_outcome.status,
+            reason=decomposition_outcome.reason,
+        ),
         trace_requested=request.trace,
         trace_available=trace_response is not None,
         trace_unavailable_reason=trace_unavailable_reason,

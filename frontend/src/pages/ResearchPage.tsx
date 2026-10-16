@@ -18,6 +18,7 @@ import { LoadingOverlay } from '../components/LoadingOverlay';
 import { RetrievalWorkspace } from '../components/RetrievalWorkspace';
 import { DocumentWorkspace } from '../components/DocumentWorkspace';
 import { useCancellableRequest } from '../hooks/useCancellableRequest';
+import { DecompositionOutcomeSummary } from '../components/DecompositionOutcomeSummary';
 import {
   askResearchQuestion,
   checkBackendHealth,
@@ -226,6 +227,16 @@ export const ResearchPage: React.FC = () => {
 
                 {/* Render Download JSON button when a response is present */}
                 {response && <DownloadButton response={response} />}
+
+                {/* Always-visible query decomposition outcome -- present on
+                    every completed response regardless of Trace Mode. Only
+                    rendered when the fuller TracePanel below is NOT shown,
+                    so the two never appear at once. */}
+                {response?.decomposition && !(traceEnabled && response?.trace) && (
+                  <div className="glass-card" style={{ padding: '1.25rem 1.5rem' }}>
+                    <DecompositionOutcomeSummary outcome={response.decomposition} />
+                  </div>
+                )}
 
                 {/* Render Trace Panel inline when trace is present and enabled */}
                 {traceEnabled && response?.trace && (

@@ -32,6 +32,12 @@ describe('ResearchPage stale-result handling', () => {
       answer: 'The first answer content',
       model: 'test-model',
       sources: [],
+      decomposition: {
+        original_query: 'first question',
+        sub_queries: ['first question'],
+        status: 'not_needed',
+        reason: null,
+      },
       trace_requested: false,
       trace_available: false,
       trace_unavailable_reason: null,
@@ -66,6 +72,12 @@ const BASE_RESPONSE = {
   answer: 'An answer',
   model: 'test-model',
   sources: [],
+  decomposition: {
+    original_query: 'a query',
+    sub_queries: ['a query'],
+    status: 'not_needed' as const,
+    reason: null,
+  },
   trace_requested: false,
   trace_available: false,
   trace_unavailable_reason: null,
@@ -114,6 +126,55 @@ describe('ResearchPage Query Router toggle', () => {
   });
 });
 
+describe('ResearchPage decomposition outcome (no Trace Mode)', () => {
+  it.each([
+    ['bypassed', null, /Query Router: bypassed decomposition/i],
+    ['decomposed', null, /Query Router: allowed decomposition/i],
+    ['not_needed', null, /Query Router: allowed decomposition/i],
+    [
+      'fallback',
+      'Automatic query decomposition was unavailable for this request; the original query was used directly.',
+      /Query Router: decomposition fallback/i,
+    ],
+  ] as const)(
+    'shows status "%s" without Trace Mode enabled',
+    async (status, reason, expectedText) => {
+      vi.mocked(checkBackendHealth).mockResolvedValue({ status: 'healthy' });
+      vi.mocked(checkBackendReadiness).mockResolvedValue({
+        status: 'ready',
+        checks: { database: true },
+      });
+
+      const user = userEvent.setup();
+      vi.mocked(askResearchQuestion).mockResolvedValueOnce({
+        ...BASE_RESPONSE,
+        decomposition: {
+          original_query: 'a question',
+          sub_queries: status === 'decomposed' ? ['sub a', 'sub b'] : ['a question'],
+          status,
+          reason,
+        },
+      });
+
+      render(<ResearchPage />);
+
+      const textarea = screen.getByPlaceholderText(/Ask a technical research question/i);
+      await user.type(textarea, 'a question');
+      await user.click(screen.getByRole('button', { name: /^Research$/i }));
+
+      await waitFor(() => expect(screen.getByText(expectedText)).toBeInTheDocument());
+
+      if (status === 'fallback') {
+        expect(screen.getByText(reason!)).toBeInTheDocument();
+      }
+      if (status === 'decomposed') {
+        expect(screen.getByText('sub a')).toBeInTheDocument();
+        expect(screen.getByText('sub b')).toBeInTheDocument();
+      }
+    },
+  );
+});
+
 describe('ResearchPage trace router-decision display', () => {
   it('renders router_bypassed and actual subqueries from the real trace contract', async () => {
     vi.mocked(checkBackendHealth).mockResolvedValue({ status: 'healthy' });
@@ -123,6 +184,12 @@ describe('ResearchPage trace router-decision display', () => {
     });
     vi.mocked(askResearchQuestion).mockResolvedValueOnce({
       ...BASE_RESPONSE,
+      decomposition: {
+        original_query: 'complex question',
+        sub_queries: ['sub query one', 'sub query two'],
+        status: 'decomposed',
+        reason: null,
+      },
       trace_requested: true,
       trace_available: true,
       trace: {
@@ -162,6 +229,12 @@ describe('ResearchPage trace router-decision display', () => {
     });
     vi.mocked(askResearchQuestion).mockResolvedValueOnce({
       ...BASE_RESPONSE,
+      decomposition: {
+        original_query: 'simple question',
+        sub_queries: ['simple question'],
+        status: 'bypassed',
+        reason: null,
+      },
       trace_requested: true,
       trace_available: true,
       trace: {
@@ -194,13 +267,45 @@ describe('ResearchPage trace router-decision display', () => {
     expect(screen.queryByText(/allowed decomposition/i)).not.toBeInTheDocument();
   });
 
-  it('does not invent a router decision or subquery list when trace is unavailable', async () => {
+  it('shows the decomposition outcome even when trace is unavailable, without inventing trace diagnostics', async () => {
+    // This is the exact regression this milestone corrects: the Query
+    // Router's decision must be visible without Trace Mode. What must
+    // never appear without tracing is the richer trace-only diagnostic
+    // data (candidate/dedup counts, the full TracePanel).
     vi.mocked(checkBackendHealth).mockResolvedValue({ status: 'healthy' });
     vi.mocked(checkBackendReadiness).mockResolvedValue({
       status: 'ready',
       checks: { database: true },
     });
     vi.mocked(askResearchQuestion).mockResolvedValueOnce(BASE_RESPONSE);
+
+    const user = userEvent.setup();
+    render(<ResearchPage />);
+
+    const textarea = screen.getByPlaceholderText(/Ask a technical research question/i);
+    await user.type(textarea, 'a question');
+    await user.click(screen.getByRole('button', { name: /^Research$/i }));
+
+    await waitFor(() => expect(screen.getByText('An answer')).toBeInTheDocument());
+
+    // The decomposition outcome IS shown...
+    expect(screen.getByText(/Query Router:/i)).toBeInTheDocument();
+    // ...but only the compact summary -- no trace-only diagnostics appear
+    // without Trace Mode (no candidate/dedup counts, no full TracePanel).
+    expect(screen.queryByText('Retrieval & Execution Trace')).not.toBeInTheDocument();
+    expect(screen.queryByText('Raw Candidates')).not.toBeInTheDocument();
+  });
+
+  it('does not invent a router decision or subquery list when the response has no decomposition data', async () => {
+    // Defensive regression guard: if a response somehow lacked
+    // `decomposition` entirely, nothing must be invented in its place.
+    vi.mocked(checkBackendHealth).mockResolvedValue({ status: 'healthy' });
+    vi.mocked(checkBackendReadiness).mockResolvedValue({
+      status: 'ready',
+      checks: { database: true },
+    });
+    const { decomposition: _omit, ...responseWithoutDecomposition } = BASE_RESPONSE;
+    vi.mocked(askResearchQuestion).mockResolvedValueOnce(responseWithoutDecomposition as any);
 
     const user = userEvent.setup();
     render(<ResearchPage />);

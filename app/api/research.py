@@ -156,6 +156,16 @@ async def _execute_research(
         router_enabled=router_enabled,
     )
 
+    # Always set by `RetrievalService._search` on every call that reaches
+    # the decomposition decision point -- independent of `effective_trace`,
+    # so this is present on every successful response, same as
+    # `app.api.retrieval.search`.
+    decomposition_outcome = retrieval_service.last_decomposition_outcome
+    assert decomposition_outcome is not None, (
+        "RetrievalService.search() must always set last_decomposition_outcome "
+        "before returning successfully."
+    )
+
     context = ContextAssembler().assemble(results)
 
     generation_result = await generation_service.generate(
@@ -176,6 +186,12 @@ async def _execute_research(
             }
             for source in context.sources
         ],
+        "decomposition": {
+            "original_query": decomposition_outcome.original_query,
+            "sub_queries": decomposition_outcome.sub_queries,
+            "status": decomposition_outcome.status,
+            "reason": decomposition_outcome.reason,
+        },
         "trace_requested": trace_requested,
         "trace_available": False,
         "trace_unavailable_reason": (

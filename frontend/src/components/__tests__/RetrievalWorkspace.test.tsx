@@ -43,6 +43,12 @@ const SUCCESSFUL_RESPONSE: RetrievalSearchResponse = {
       rerank_score: 0.75,
     },
   ],
+  decomposition: {
+    original_query: 'a query',
+    sub_queries: ['a query'],
+    status: 'not_needed',
+    reason: null,
+  },
   trace_requested: false,
   trace_available: false,
   trace_unavailable_reason: null,
@@ -95,6 +101,50 @@ describe('RetrievalWorkspace Query Router field', () => {
       router_enabled: true,
     });
   });
+});
+
+describe('RetrievalWorkspace decomposition outcome (no Trace Mode)', () => {
+  it.each([
+    ['bypassed', null, /Query Router: bypassed decomposition/i],
+    ['decomposed', null, /Query Router: allowed decomposition/i],
+    ['not_needed', null, /Query Router: allowed decomposition/i],
+    [
+      'fallback',
+      'Automatic query decomposition was unavailable for this request; the original query was used directly.',
+      /Query Router: decomposition fallback/i,
+    ],
+  ] as const)(
+    'shows status "%s" without Trace Mode enabled',
+    async (status, reason, expectedText) => {
+      const user = userEvent.setup();
+      const mocked = vi.mocked(searchRetrievedChunks);
+      mocked.mockResolvedValueOnce({
+        ...SUCCESSFUL_RESPONSE,
+        decomposition: {
+          original_query: 'a query',
+          sub_queries: status === 'decomposed' ? ['sub a', 'sub b'] : ['a query'],
+          status,
+          reason,
+        },
+      });
+
+      render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
+
+      const textarea = screen.getByPlaceholderText(/Enter search query/i);
+      await user.type(textarea, 'a query');
+      await user.click(screen.getByRole('button', { name: /Execute Vector Retrieval/i }));
+
+      await waitFor(() => expect(screen.getByText(expectedText)).toBeInTheDocument());
+
+      if (status === 'fallback') {
+        expect(screen.getByText(reason!)).toBeInTheDocument();
+      }
+      if (status === 'decomposed') {
+        expect(screen.getByText('sub a')).toBeInTheDocument();
+        expect(screen.getByText('sub b')).toBeInTheDocument();
+      }
+    },
+  );
 });
 
 describe('RetrievalWorkspace router decision display', () => {
@@ -163,10 +213,35 @@ describe('RetrievalWorkspace router decision display', () => {
     expect(screen.queryByText(/allowed decomposition/i)).not.toBeInTheDocument();
   });
 
-  it('does not invent a router decision when trace is unavailable', async () => {
+  it('shows the decomposition outcome even when trace is unavailable, without inventing trace diagnostics', async () => {
+    // This is the exact regression this milestone corrects: the Query
+    // Router's decision must be visible without Trace Mode. What must
+    // never appear without tracing is the richer trace-only diagnostic
+    // data (candidate/dedup counts, the "View Trace" button).
     const user = userEvent.setup();
     const mocked = vi.mocked(searchRetrievedChunks);
     mocked.mockResolvedValueOnce(SUCCESSFUL_RESPONSE);
+
+    render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
+
+    const textarea = screen.getByPlaceholderText(/Enter search query/i);
+    await user.type(textarea, 'a query');
+    await user.click(screen.getByRole('button', { name: /Execute Vector Retrieval/i }));
+
+    await waitFor(() => expect(screen.getByText('Some retrieved content')).toBeInTheDocument());
+
+    expect(screen.getByText(/Query Router:/i)).toBeInTheDocument();
+    expect(screen.queryByText('Raw Candidates')).not.toBeInTheDocument();
+    expect(screen.queryByText(/View Trace & Rerank Scores/i)).not.toBeInTheDocument();
+  });
+
+  it('does not invent a router decision when the response has no decomposition data', async () => {
+    // Defensive regression guard: if a response somehow lacked
+    // `decomposition` entirely, nothing must be invented in its place.
+    const user = userEvent.setup();
+    const mocked = vi.mocked(searchRetrievedChunks);
+    const { decomposition: _omit, ...responseWithoutDecomposition } = SUCCESSFUL_RESPONSE;
+    mocked.mockResolvedValueOnce(responseWithoutDecomposition as any);
 
     render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
 

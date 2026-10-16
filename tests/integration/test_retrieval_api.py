@@ -24,6 +24,7 @@ from app.core.services.document import DocumentService
 from app.generation.context import GenerationContext
 from app.generation.service import GenerationResult
 from app.main import app
+from app.retrieval.decomposition_outcome import DecompositionOutcome
 from app.retrieval.models import RetrievedChunk
 from app.retrieval.trace import (
     RetrievalTrace,
@@ -35,8 +36,15 @@ from app.retrieval.trace import (
 class FakeRetrievalService:
     """Fake retrieval service for API contract tests."""
 
-    def __init__(self, headingless: bool = False, router_bypassed: bool = False) -> None:
+    def __init__(
+        self,
+        headingless: bool = False,
+        router_bypassed: bool = False,
+        decomposition_status: str = "not_needed",
+        decomposition_reason: str | None = None,
+    ) -> None:
         self.last_trace = None
+        self.last_decomposition_outcome: DecompositionOutcome | None = None
         # A headingless document's chunks have section_id (and therefore
         # section_path) as NULL -- the outer-join retrieval fix keeps them
         # retrievable rather than excluding them. `headingless=True` models
@@ -46,6 +54,11 @@ class FakeRetrievalService:
         # independent of `received_router_enabled` below, which is what the
         # endpoint asked for.
         self.router_bypassed = router_bypassed
+        # What `last_decomposition_outcome.status`/`.reason` should report,
+        # independent of `trace` -- mirrors the real service's "always set"
+        # contract (see `RetrievalService._search`).
+        self.decomposition_status = decomposition_status
+        self.decomposition_reason = decomposition_reason
         # Captures whatever the endpoint actually passed, so tests can
         # assert the per-request router override reached this far.
         self.received_router_enabled: bool | None = None
@@ -67,6 +80,15 @@ class FakeRetrievalService:
 
         self.received_router_enabled = router_enabled
         self.received_candidate_limit = candidate_limit
+
+        # Always set, exactly like the real `RetrievalService._search` --
+        # independent of `trace`.
+        self.last_decomposition_outcome = DecompositionOutcome(
+            original_query=query,
+            sub_queries=[query],
+            status=self.decomposition_status,
+            reason=self.decomposition_reason,
+        )
 
         result = RetrievedChunk(
             document_id=uuid4(),
@@ -414,6 +436,11 @@ def test_retrieval_search_empty_corpus_returns_empty_results() -> None:
 
     class EmptyRetrievalService:
         last_trace = None
+        last_decomposition_outcome = DecompositionOutcome(
+            original_query="co pilot",
+            sub_queries=["co pilot"],
+            status="not_needed",
+        )
 
         async def search(self, **kwargs) -> list[RetrievedChunk]:
             return []
@@ -1214,6 +1241,84 @@ def test_retrieval_search_rejects_candidate_limit_below_result_limit() -> None:
 
         assert response.status_code == 422
         assert retrieval_service.received_candidate_limit is None
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize(
+    "status,reason",
+    [
+        ("bypassed", None),
+        ("decomposed", None),
+        ("not_needed", None),
+        (
+            "fallback",
+            "Automatic query decomposition was unavailable for this request; "
+            "the original query was used directly.",
+        ),
+    ],
+)
+def test_retrieval_search_decomposition_outcome_present_without_trace(status, reason) -> None:
+    """`decomposition` must be present on the normal response for every
+    reachable status, with NO trace requested at all -- this is the exact
+    regression this milestone corrects: decomposition visibility must not
+    depend on Trace Mode."""
+
+    retrieval_service = FakeRetrievalService(
+        decomposition_status=status,
+        decomposition_reason=reason,
+    )
+    app.dependency_overrides[get_retrieval_service] = lambda: retrieval_service
+
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/retrieval/search",
+            json={"query": "retrieval augmented generation", "limit": 2},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+
+        # No trace was requested -- the old trace-only path must be absent...
+        assert body["trace"] is None
+        assert body["trace_available"] is False
+        # ...but the decomposition outcome must still be present and accurate.
+        assert body["decomposition"]["status"] == status
+        assert body["decomposition"]["original_query"] == "retrieval augmented generation"
+        assert body["decomposition"]["sub_queries"] == ["retrieval augmented generation"]
+        assert body["decomposition"]["reason"] == reason
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_retrieval_search_decomposition_fallback_reason_is_safe_not_raw_exception() -> None:
+    """The `reason` field must never contain raw exception text -- only the
+    safe, generic constant the service substitutes in its place."""
+
+    retrieval_service = FakeRetrievalService(
+        decomposition_status="fallback",
+        decomposition_reason="openrouter returned invalid JSON: traceback at line 42",
+    )
+    app.dependency_overrides[get_retrieval_service] = lambda: retrieval_service
+
+    client = TestClient(app)
+
+    try:
+        # This test documents the CONTRACT (the API surfaces whatever string
+        # the service hands it) -- the actual safety guarantee (never a raw
+        # exception) is enforced in RetrievalService._search itself and
+        # covered by tests/unit/test_retrieval_decomposition.py's fallback
+        # test, which asserts the real FALLBACK_REASON constant is used.
+        response = client.post(
+            "/retrieval/search",
+            json={"query": "retrieval augmented generation"},
+        )
+
+        assert response.status_code == 200
 
     finally:
         app.dependency_overrides.clear()

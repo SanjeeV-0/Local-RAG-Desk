@@ -20,6 +20,11 @@ from app.core.repositories.document import DocumentRepository
 from app.embeddings.provider import EmbeddingProvider
 from app.generation.context import ContextAssembler
 from app.observability.langfuse import get_langfuse
+from app.retrieval.decomposition_outcome import (
+    FALLBACK_REASON,
+    DecompositionOutcome,
+    DecompositionStatus,
+)
 from app.retrieval.models import RetrievedChunk
 from app.retrieval.query_decomposer import QueryDecomposer
 from app.retrieval.query_router import should_decompose
@@ -68,6 +73,11 @@ class RetrievalService:
         # reported in the Langfuse observation below regardless of the
         # trace flag.
         self.last_router_bypassed: bool = False
+        # Same "always set, trace-independent" rule as `last_router_bypassed`
+        # -- read by both HTTP endpoints on every successful request so the
+        # decomposition outcome is visible without Trace Mode. See
+        # `app.retrieval.decomposition_outcome.DecompositionOutcome`.
+        self.last_decomposition_outcome: DecompositionOutcome | None = None
 
     async def search(
         self,
@@ -93,6 +103,7 @@ class RetrievalService:
         """
 
         self.last_trace = None
+        self.last_decomposition_outcome = None
 
         if candidate_limit is None:
             candidate_limit = max(limit, self.candidate_limit_floor)
@@ -200,7 +211,13 @@ class RetrievalService:
         router_bypassed = False
 
         if self.query_decomposer is None:
+            # Untriggered in production -- `get_retrieval_service` always
+            # wires a decomposer; this branch only exists for unit tests
+            # that construct `RetrievalService` without one. No split ever
+            # happens here, so "not_needed" is the accurate status.
             retrieval_queries = (query,)
+            decomposition_status: DecompositionStatus = "not_needed"
+            decomposition_reason: str | None = None
         elif effective_router_enabled and not should_decompose(query):
             # The deterministic router decided this query is confidently
             # single-intent -- skip the QueryDecomposer call (and therefore
@@ -209,6 +226,8 @@ class RetrievalService:
             # query it did not decompose: `(query,)`.
             retrieval_queries = (query,)
             router_bypassed = True
+            decomposition_status = "bypassed"
+            decomposition_reason = None
         else:
             # Decomposition always runs here, unconditionally, whenever a
             # decomposer is configured and the router is disabled (or did
@@ -218,7 +237,31 @@ class RetrievalService:
             decomposition = await self.query_decomposer.decompose(query)
             retrieval_queries = decomposition.sub_queries
 
+            if decomposition.fallback_reason is not None:
+                # The provider/parsing failed inside QueryDecomposer, which
+                # already fell back to the original query alone. The real
+                # exception text (`decomposition.fallback_reason`) is
+                # deliberately never surfaced here -- only the safe, generic
+                # `FALLBACK_REASON` constant is user-facing.
+                decomposition_status = "fallback"
+                decomposition_reason = FALLBACK_REASON
+            elif decomposition.was_decomposed:
+                decomposition_status = "decomposed"
+                decomposition_reason = None
+            else:
+                decomposition_status = "not_needed"
+                decomposition_reason = None
+
         self.last_router_bypassed = router_bypassed
+        # Always overwritten here, on every call that reaches this point --
+        # never conditional on `trace`, and never left over from a previous
+        # call, so no stale outcome can leak into this request's response.
+        self.last_decomposition_outcome = DecompositionOutcome(
+            original_query=query,
+            sub_queries=list(retrieval_queries),
+            status=decomposition_status,
+            reason=decomposition_reason,
+        )
 
         merged_candidates: dict[UUID, RetrievedChunk] = {}
 

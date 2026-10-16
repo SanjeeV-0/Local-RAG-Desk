@@ -97,10 +97,41 @@ export interface TraceData {
  */
 export type TraceUnavailableReason = 'server_disabled';
 
+/**
+ * Always-present summary of what query decomposition actually did for one
+ * request -- present on EVERY successful response from both
+ * POST /research/ask and POST /retrieval/search, independent of Trace Mode
+ * (unlike `TraceData`, which requires `trace_available`). The Query Router
+ * controls whether decomposition runs; Trace Mode must never control
+ * whether this outcome is visible.
+ *
+ * `status`:
+ *  - "bypassed": the deterministic query router decided this query was
+ *    confidently single-intent and skipped the decomposer entirely.
+ *  - "decomposed": the decomposer ran and produced more than one retrieval
+ *    sub-query -- shown in `sub_queries`, in their real, actual order.
+ *  - "not_needed": the decomposer ran and decided a single sub-query was
+ *    sufficient. Looks identical to "bypassed" in `sub_queries` (both are
+ *    `[original_query]`) -- `status` is what distinguishes them.
+ *  - "fallback": the decomposer's provider/parsing failed and retrieval
+ *    fell back to the original query alone. `reason` is a short, safe,
+ *    user-facing message in this case -- never a raw exception.
+ *
+ * Never inferred here from query text, subquery count, or router settings
+ * alone -- always read verbatim from the backend's actual executed outcome.
+ */
+export interface DecompositionOutcome {
+  original_query: string;
+  sub_queries: string[];
+  status: 'bypassed' | 'decomposed' | 'not_needed' | 'fallback';
+  reason: string | null;
+}
+
 export interface ResearchResponse {
   answer: string;
   model: string;
   sources: Source[];
+  decomposition: DecompositionOutcome;
   trace_requested: boolean;
   trace_available: boolean;
   trace_unavailable_reason: TraceUnavailableReason | null;
@@ -146,6 +177,7 @@ export interface RetrievedChunkResponse {
 
 export interface RetrievalSearchResponse {
   results: RetrievedChunkResponse[];
+  decomposition: DecompositionOutcome;
   trace_requested: boolean;
   trace_available: boolean;
   trace_unavailable_reason: TraceUnavailableReason | null;

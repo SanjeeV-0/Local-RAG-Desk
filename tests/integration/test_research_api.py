@@ -12,14 +12,23 @@ from app.core.dependencies import (
 from app.generation.context import GenerationContext
 from app.generation.generation_service import GenerationResult
 from app.main import app
+from app.retrieval.decomposition_outcome import DecompositionOutcome
 from app.retrieval.models import RetrievedChunk
 from app.retrieval.trace import RetrievalTrace, RetrievalTraceCandidate
 
 
 class FakeRetrievalService:
-    def __init__(self, router_bypassed: bool = False) -> None:
+    def __init__(
+        self,
+        router_bypassed: bool = False,
+        decomposition_status: str = "not_needed",
+        decomposition_reason: str | None = None,
+    ) -> None:
         self.last_trace = None
+        self.last_decomposition_outcome: DecompositionOutcome | None = None
         self.router_bypassed = router_bypassed
+        self.decomposition_status = decomposition_status
+        self.decomposition_reason = decomposition_reason
         # Captures whatever the endpoint actually passed, so tests can
         # assert the per-request router override reached this far.
         self.received_router_enabled: bool | None = None
@@ -36,6 +45,15 @@ class FakeRetrievalService:
         router_enabled=None,
     ) -> list[RetrievedChunk]:
         self.received_router_enabled = router_enabled
+
+        # Always set, exactly like the real `RetrievalService._search` --
+        # independent of `trace`.
+        self.last_decomposition_outcome = DecompositionOutcome(
+            original_query=query,
+            sub_queries=[query],
+            status=self.decomposition_status,
+            reason=self.decomposition_reason,
+        )
 
         result = RetrievedChunk(
             document_id=uuid4(),
@@ -250,6 +268,55 @@ async def test_research_ask_trace_reports_router_bypassed_false() -> None:
         body = response.json()
         assert "trace" in body
         assert body["trace"]["router_bypassed"] is False
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize(
+    "status,reason",
+    [
+        ("bypassed", None),
+        ("decomposed", None),
+        ("not_needed", None),
+        (
+            "fallback",
+            "Automatic query decomposition was unavailable for this request; "
+            "the original query was used directly.",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_research_ask_decomposition_outcome_present_without_trace(status, reason) -> None:
+    """`decomposition` must be present on /research/ask's normal response
+    for every reachable status, with NO trace requested at all -- the same
+    regression fix as /retrieval/search, without relying on the trace-only
+    field."""
+
+    retrieval_service = FakeRetrievalService(
+        decomposition_status=status,
+        decomposition_reason=reason,
+    )
+    generation_service = FakeGenerationService()
+
+    app.dependency_overrides[get_retrieval_service] = lambda: retrieval_service
+    app.dependency_overrides[get_generation_service] = lambda: generation_service
+
+    try:
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/research/ask", json={"query": "What is RAG?"})
+
+        assert response.status_code == 200
+        body = response.json()
+
+        assert "trace" not in body
+        assert body["trace_available"] is False
+        assert body["decomposition"]["status"] == status
+        assert body["decomposition"]["original_query"] == "What is RAG?"
+        assert body["decomposition"]["sub_queries"] == ["What is RAG?"]
+        assert body["decomposition"]["reason"] == reason
 
     finally:
         app.dependency_overrides.clear()

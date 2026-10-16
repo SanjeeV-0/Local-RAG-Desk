@@ -3,6 +3,7 @@ from uuid import uuid4
 
 import pytest
 
+from app.retrieval.decomposition_outcome import FALLBACK_REASON
 from app.retrieval.models import RetrievedChunk
 from app.retrieval.query_decomposer import QueryDecomposer
 from app.retrieval.service import RetrievalService
@@ -41,8 +42,17 @@ class FakeRepository:
 
 
 class FakeDecomposer:
-    def __init__(self, sub_queries: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        sub_queries: tuple[str, ...],
+        fallback_reason: str | None = None,
+    ) -> None:
         self.sub_queries = sub_queries
+        # Mirrors `QueryDecompositionResult.fallback_reason` -- set this to
+        # simulate a provider/parsing failure that fell back to the
+        # original query, exactly like the real `QueryDecomposer` would
+        # produce.
+        self.fallback_reason = fallback_reason
         self.received_query: str | None = None
 
     async def decompose(self, query: str):
@@ -51,7 +61,11 @@ class FakeDecomposer:
         return type(
             "Decomposition",
             (),
-            {"sub_queries": self.sub_queries},
+            {
+                "sub_queries": self.sub_queries,
+                "was_decomposed": len(self.sub_queries) > 1,
+                "fallback_reason": self.fallback_reason,
+            },
         )()
 
 
@@ -663,3 +677,163 @@ async def test_concurrent_calls_with_opposite_router_overrides_do_not_leak() -> 
         chunk_complex_a.chunk_id,
         chunk_complex_b.chunk_id,
     }
+
+
+@pytest.mark.asyncio
+async def test_decomposition_outcome_status_bypassed() -> None:
+    """`last_decomposition_outcome.status` is "bypassed" exactly when the
+    router actually skipped the decomposer -- never inferred from
+    sub_queries length or query text."""
+
+    chunk = _chunk("only", 0.1)
+    repository = QueryRepository({SIMPLE_QUERY: [chunk]})
+    decomposer = FakeDecomposer(("should not be used",))
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=QueryEmbeddingProvider(),
+        query_decomposer=decomposer,
+        router_enabled=True,
+    )
+
+    await service.search(SIMPLE_QUERY, limit=1, candidate_limit=5)
+
+    outcome = service.last_decomposition_outcome
+    assert outcome is not None
+    assert outcome.status == "bypassed"
+    assert outcome.original_query == SIMPLE_QUERY
+    assert outcome.sub_queries == [SIMPLE_QUERY]
+    assert outcome.reason is None
+
+
+@pytest.mark.asyncio
+async def test_decomposition_outcome_status_decomposed() -> None:
+    """`status` is "decomposed" exactly when the decomposer actually
+    produced more than one sub-query -- the sub_queries list is the real,
+    order-preserved output, never reconstructed."""
+
+    first = _chunk("first", 0.2)
+    second = _chunk("second", 0.1)
+    repository = QueryRepository({"query one": [first], "query two": [second]})
+    decomposer = FakeDecomposer(("query one", "query two"))
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=QueryEmbeddingProvider(),
+        query_decomposer=decomposer,
+        router_enabled=False,
+    )
+
+    await service.search(COMPLEX_QUERY, limit=2, candidate_limit=5)
+
+    outcome = service.last_decomposition_outcome
+    assert outcome is not None
+    assert outcome.status == "decomposed"
+    assert outcome.original_query == COMPLEX_QUERY
+    assert outcome.sub_queries == ["query one", "query two"]
+    assert outcome.reason is None
+
+
+@pytest.mark.asyncio
+async def test_decomposition_outcome_status_not_needed() -> None:
+    """`status` is "not_needed" when the decomposer ran (the router didn't
+    bypass it) and itself decided a single sub-query was sufficient --
+    distinct from "bypassed", even though `sub_queries` looks identical."""
+
+    chunk = _chunk("only", 0.1)
+    repository = QueryRepository({SIMPLE_QUERY: [chunk]})
+    decomposer = FakeDecomposer((SIMPLE_QUERY,))
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=QueryEmbeddingProvider(),
+        query_decomposer=decomposer,
+        router_enabled=False,
+    )
+
+    await service.search(SIMPLE_QUERY, limit=1, candidate_limit=5)
+
+    outcome = service.last_decomposition_outcome
+    assert outcome is not None
+    assert outcome.status == "not_needed"
+    assert outcome.sub_queries == [SIMPLE_QUERY]
+    assert outcome.reason is None
+
+
+@pytest.mark.asyncio
+async def test_decomposition_outcome_status_fallback_uses_safe_reason() -> None:
+    """`status` is "fallback" when the decomposer's provider failed --
+    `reason` must be the safe, generic constant, NEVER the raw exception
+    text the provider raised."""
+
+    chunk = _chunk("only", 0.1)
+    repository = QueryRepository({SIMPLE_QUERY: [chunk]})
+    decomposer = FakeDecomposer(
+        (SIMPLE_QUERY,),
+        fallback_reason="connection reset by peer at 10.0.0.5:443",
+    )
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=QueryEmbeddingProvider(),
+        query_decomposer=decomposer,
+        router_enabled=False,
+    )
+
+    await service.search(SIMPLE_QUERY, limit=1, candidate_limit=5)
+
+    outcome = service.last_decomposition_outcome
+    assert outcome is not None
+    assert outcome.status == "fallback"
+    assert outcome.sub_queries == [SIMPLE_QUERY]
+    assert outcome.reason == FALLBACK_REASON
+    # The raw exception text must never leak into the user-facing reason.
+    assert "10.0.0.5" not in (outcome.reason or "")
+
+
+@pytest.mark.asyncio
+async def test_decomposition_outcome_present_even_without_trace() -> None:
+    """`last_decomposition_outcome` must be set regardless of `trace` --
+    the entire point of this milestone."""
+
+    chunk = _chunk("only", 0.1)
+    repository = QueryRepository({SIMPLE_QUERY: [chunk]})
+    decomposer = FakeDecomposer((SIMPLE_QUERY,))
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=QueryEmbeddingProvider(),
+        query_decomposer=decomposer,
+        router_enabled=False,
+    )
+
+    await service.search(SIMPLE_QUERY, limit=1, candidate_limit=5, trace=False)
+
+    assert service.last_trace is None
+    assert service.last_decomposition_outcome is not None
+
+
+@pytest.mark.asyncio
+async def test_decomposition_outcome_does_not_leak_between_requests() -> None:
+    """A second call's outcome must fully replace the first's -- no stale
+    status/sub_queries/reason can survive across requests on the same
+    instance."""
+
+    chunk_a = _chunk("a", 0.1)
+    chunk_b = _chunk("b", 0.1)
+    repository = QueryRepository({"query a": [chunk_a], SIMPLE_QUERY: [chunk_b]})
+    decomposer = FakeDecomposer(("query a",))
+    service = RetrievalService(
+        repository=repository,
+        embedding_provider=QueryEmbeddingProvider(),
+        query_decomposer=decomposer,
+        router_enabled=False,
+    )
+
+    await service.search("first query", limit=1, candidate_limit=5)
+    first_outcome = service.last_decomposition_outcome
+    assert first_outcome is not None
+    assert first_outcome.original_query == "first query"
+
+    decomposer.sub_queries = (SIMPLE_QUERY,)
+    await service.search(SIMPLE_QUERY, limit=1, candidate_limit=5)
+    second_outcome = service.last_decomposition_outcome
+
+    assert second_outcome is not None
+    assert second_outcome.original_query == SIMPLE_QUERY
+    assert second_outcome is not first_outcome
