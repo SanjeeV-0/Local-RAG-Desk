@@ -89,6 +89,37 @@ def test_context_assembler_rejects_negative_budget() -> None:
         ContextAssembler(max_characters=-1)
 
 
+def test_context_assembler_redacts_pii_in_chunk_content() -> None:
+    chunk = _chunk("Contact jdoe@example.com for the on-call rotation.", 1)
+
+    context = ContextAssembler().assemble([chunk])
+
+    assert "[REDACTED:EMAIL]" in context.text
+    assert "jdoe@example.com" not in context.text
+    assert "Contact" in context.text
+    assert "for the on-call rotation." in context.text
+    assert context.redacted_source_count == 1
+
+
+def test_context_assembler_counts_only_chunks_with_redactions() -> None:
+    clean = _chunk("No sensitive content here.", 1)
+    dirty = _chunk("Call 555-123-4567 for support.", 2)
+
+    context = ContextAssembler().assemble([clean, dirty])
+
+    assert context.redacted_source_count == 1
+    assert "555-123-4567" not in context.text
+    assert "[REDACTED:PHONE]" in context.text
+
+
+def test_context_assembler_clean_chunks_report_zero_redactions() -> None:
+    chunk = _chunk("Entirely safe research content.", 1)
+
+    context = ContextAssembler().assemble([chunk])
+
+    assert context.redacted_source_count == 0
+
+
 def test_context_assembler_passes_table_markdown_through_unchanged() -> None:
     """A table chunk's content is just text to ContextAssembler -- no
     special-cased table generation path exists or is needed."""
