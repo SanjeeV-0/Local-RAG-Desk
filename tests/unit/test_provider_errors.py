@@ -80,6 +80,79 @@ def test_permission_denied_with_moderation_signal_is_guardrail_rejection() -> No
     assert classify_openai_exception(exc) == ProviderErrorCategory.GUARDRAIL_OR_POLICY_REJECTION
 
 
+def test_permission_denied_with_pii_message_is_classified_as_guardrail_rejection() -> None:
+    """Reproduces a real observed OpenRouter 403 whose ONLY signal is in the
+    message text -- `code` is the int 403 (not a string, so it is never a
+    candidate), and `metadata` carries no recognizable key names."""
+
+    exc = _status_error(
+        openai.PermissionDeniedError,
+        403,
+        body={
+            "error": {
+                "message": "Request blocked: PII detected (PERSON)",
+                "code": 403,
+                "metadata": {"provider_name": None, "previous_errors": []},
+            },
+            "user_id": "user_abc123",
+        },
+    )
+    assert classify_openai_exception(exc) == ProviderErrorCategory.GUARDRAIL_OR_POLICY_REJECTION
+
+
+def test_bad_request_with_moderation_message_is_classified_as_guardrail_rejection() -> None:
+    exc = _status_error(
+        openai.BadRequestError,
+        400,
+        body={"error": {"message": "This request was rejected by our content moderation system."}},
+    )
+    assert classify_openai_exception(exc) == ProviderErrorCategory.GUARDRAIL_OR_POLICY_REJECTION
+
+
+def test_permission_denied_with_unrelated_message_stays_authentication() -> None:
+    """An explicit, unambiguous access/credential rejection message with no
+    moderation/PII signal must remain AUTHENTICATION_OR_CONFIG -- a 403 is
+    never assumed to be a guardrail rejection just because it has a message."""
+
+    exc = _status_error(
+        openai.PermissionDeniedError,
+        403,
+        body={"error": {"message": "Invalid API key provided.", "code": 403}},
+    )
+    assert classify_openai_exception(exc) == ProviderErrorCategory.AUTHENTICATION_OR_CONFIG
+
+
+def test_ambiguous_permission_denied_message_defaults_conservatively() -> None:
+    """A vague/ambiguous 403 message with no recognizable moderation or
+    auth-specific wording must default conservatively to
+    AUTHENTICATION_OR_CONFIG rather than being guessed as a guardrail
+    rejection."""
+
+    exc = _status_error(
+        openai.PermissionDeniedError,
+        403,
+        body={"error": {"message": "Forbidden.", "code": 403}},
+    )
+    assert classify_openai_exception(exc) == ProviderErrorCategory.AUTHENTICATION_OR_CONFIG
+
+
+def test_message_signal_never_overrides_wrapped_error_public_text() -> None:
+    """The message text used for classification must never leak into the
+    safe, public-facing error -- only the fixed, category-keyed string."""
+
+    secret_message = "Request blocked: PII detected (PERSON) SYNTHETIC_MARKER_XYZ"
+    exc = _status_error(
+        openai.PermissionDeniedError,
+        403,
+        body={"error": {"message": secret_message, "code": 403}},
+    )
+    wrapped = wrap_openai_exception(exc)
+
+    assert wrapped.category == ProviderErrorCategory.GUARDRAIL_OR_POLICY_REJECTION
+    assert "SYNTHETIC_MARKER_XYZ" not in wrapped.safe_message
+    assert "SYNTHETIC_MARKER_XYZ" not in str(wrapped)
+
+
 def test_authentication_error_classified_correctly() -> None:
     exc = _status_error(openai.AuthenticationError, 401)
     assert classify_openai_exception(exc) == ProviderErrorCategory.AUTHENTICATION_OR_CONFIG

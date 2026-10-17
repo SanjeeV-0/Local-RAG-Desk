@@ -13,8 +13,11 @@ NOT treated as proof of a guardrail/content-policy rejection -- a plain
 unsupported field, oversized context) than a moderation block, and a 403
 `PermissionDeniedError` is far more often an access/API-key restriction than
 a content decision. `GUARDRAIL_OR_POLICY_REJECTION` is only assigned when
-the parsed error body carries a recognizable moderation-related signal (see
-`_looks_like_guardrail_rejection` below); otherwise a 400 is reported as
+the parsed error body carries a recognizable moderation-related signal --
+preferably a structured field (`code`/`type`/`metadata` keys), with the
+parsed `error.message` text itself checked only as a narrow fallback
+against a curated phrase list (see `_looks_like_guardrail_rejection`
+below); otherwise a 400 is reported as
 `INVALID_REQUEST` and a 403 as `AUTHENTICATION_OR_CONFIG`, so callers are
 never told "the guardrail blocked this" without actual evidence. This
 classification never bypasses or weakens OpenRouter's own guardrails; it
@@ -100,11 +103,13 @@ class ProviderUnavailableError(Exception):
         super().__init__(self.safe_message)
 
 
-# Substrings looked for (case-insensitively) in whatever safe, already-
-# server-side-only diagnostic fields the `openai` SDK parsed out of the
-# error body (`exc.code`, `exc.type`, `exc.param`) -- never the raw message
-# text itself, and never exposed to the caller either way, only used here to
-# decide which safe category to report. This is deliberately conservative:
+# Substrings looked for (case-insensitively), in priority order, in the
+# diagnostic fields the `openai` SDK parsed out of the error body
+# (`exc.code`, `exc.type`, `exc.param`, `error.metadata` keys), and -- only
+# as a narrow fallback when none of those carry a signal -- the parsed
+# `error.message` text itself (see `_looks_like_guardrail_rejection`). None
+# of this is ever exposed to the caller; it is used only to decide which
+# safe, fixed category string to report. This is deliberately conservative:
 # a 400/403 with none of these signals is NOT assumed to be a guardrail
 # rejection (see module docstring).
 _GUARDRAIL_SIGNAL_SUBSTRINGS = (
@@ -124,11 +129,28 @@ def _looks_like_guardrail_rejection(exc: openai.APIStatusError) -> bool:
     """Best-effort, evidence-based check for an actual moderation/guardrail
     signal in the parsed error body -- never assumed from status code alone.
 
-    Inspects `exc.code`/`exc.type`/`exc.param` (parsed server-side by the
-    SDK from the JSON error body) plus the top-level keys of `exc.body`
-    (e.g. OpenRouter's own `error.metadata` wrapper), never the raw message
-    string, so this stays a structural check rather than text matching on
-    content that could itself contain user data.
+    Structured fields are checked first and are the preferred signal:
+    `exc.code`/`exc.type`/`exc.param` (parsed server-side by the SDK from
+    the JSON error body) plus the top-level keys of `exc.body` (e.g.
+    OpenRouter's own `error.metadata` wrapper) -- these are machine-set
+    values, not free text, so matching them carries no risk of keying off
+    arbitrary user/document content.
+
+    As a narrow fallback, the parsed `error.message` field's TEXT is also
+    checked against the same curated signal list. This is a deliberate,
+    narrowly-scoped exception to "never inspect message text": observed
+    real OpenRouter guardrail rejections (e.g. a 403 whose body is
+    `{"error": {"message": "Request blocked: PII detected (PERSON)", ...}}`)
+    carry their only machine-readable signal inside this field, with no
+    matching `code`/`type`/`metadata` key. The message text is used ONLY to
+    decide the boolean classification here; it is never stored, logged, or
+    included in `ProviderUnavailableError.safe_message` (see
+    `_SAFE_MESSAGES`, which is a fixed, category-keyed string, and
+    `wrap_openai_exception`, which never forwards `exc` text to its return
+    value). A 403/400 whose message carries none of these specific signals
+    is NOT assumed to be a guardrail rejection -- it stays classified as an
+    auth/config or invalid-request error, same as before this fallback was
+    added.
     """
 
     candidates: list[str] = []
@@ -154,6 +176,13 @@ def _looks_like_guardrail_rejection(exc: openai.APIStatusError) -> bool:
                 # value inside it -- values may contain request content and
                 # are deliberately never inspected or logged here.
                 candidates.extend(key.lower() for key in metadata)
+
+            message = error_obj.get("message")
+            if isinstance(message, str):
+                # Narrow fallback only -- see docstring above. Appended
+                # last so structured-field signals are always checked
+                # first/independently; this never replaces them.
+                candidates.append(message.lower())
 
     return any(
         signal in candidate for candidate in candidates for signal in _GUARDRAIL_SIGNAL_SUBSTRINGS
