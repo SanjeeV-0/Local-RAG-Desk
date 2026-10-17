@@ -11,6 +11,7 @@ group_structural_units` (see that module's docstring) -- both call sites
 share this one splitting implementation rather than duplicating it.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from app.ingestion.structure import TableData
@@ -30,15 +31,27 @@ class TableFragment:
 
 
 def _estimate_tokens(text: str) -> int:
-    """Estimate token count for deterministic chunk sizing."""
+    """Estimate token count for deterministic chunk sizing.
+
+    Default `count_tokens` for `split_table` -- preserves this exact,
+    word-count-estimated behavior for every existing caller. See
+    `app.ingestion.size_guard`'s module docstring for why a real tokenizer
+    is only used when a caller explicitly opts in by passing one.
+    """
     return max(1, len(text.split()))
 
 
 def split_table(
     table: TableData,
     max_tokens: int = 600,
+    count_tokens: Callable[[str], int] = _estimate_tokens,
 ) -> list[TableFragment]:
-    """Split a large table into self-contained Markdown fragments."""
+    """Split a large table into self-contained Markdown fragments.
+
+    `count_tokens` measures each candidate fragment's full rendered
+    Markdown (never an additive approximation), so it is exact regardless
+    of which counter is supplied.
+    """
     if not table.rows:
         content = table_to_markdown(table)
 
@@ -67,7 +80,7 @@ def split_table(
             page_numbers=table.page_numbers,
         )
 
-        if current_rows and _estimate_tokens(table_to_markdown(candidate)) > max_tokens:
+        if current_rows and count_tokens(table_to_markdown(candidate)) > max_tokens:
             fragments.append(current_rows)
             current_rows = [row]
         else:

@@ -13,6 +13,7 @@ a second, divergent formatting implementation, or old and new vectors would
 not be directly comparable for reasons beyond just "the model changed".
 """
 
+from collections.abc import Callable, Sequence
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +24,48 @@ from app.embeddings.provider import EmbeddingProvider
 from app.ingestion.embedding_text import build_embedding_text
 from app.ingestion.size_guard import ChildChunk
 from app.ingestion.structure import UnitType
+
+
+def validate_embedding_inputs_within_budget(
+    chunks: Sequence[ChildChunk],
+    embedding_texts: Sequence[str],
+    token_counter: Callable[[str], int] | None,
+    max_embedding_tokens: int | None,
+) -> None:
+    """Final, tokenizer-aware safety net before any embedding call.
+
+    Only runs when both `token_counter` and `max_embedding_tokens` are
+    supplied (i.e. the configured embedding provider exposes real token
+    counting -- see `app.embeddings.sentence_transformer`); called with
+    either as `None` (a provider without that capability, e.g. test fakes),
+    this is a complete no-op, unchanged from before this check existed.
+
+    This is a backstop for any case the ingestion size guard did not
+    anticipate (an unusually long section path combined with content
+    already right at its reserved budget, tokenizer non-additivity beyond
+    the configured safety margin, etc.) -- it never truncates or modifies
+    `embedding_texts`; it only refuses to silently hand an oversized input
+    to the model, the same explicit-failure policy already used for an
+    unshrinkable table row (see `app.ingestion.size_guard.apply_size_guard`).
+
+    Pure and side-effect-free (no I/O), independent of `ChunkService`'s
+    database dependency, so it is directly unit-testable without a session.
+    """
+
+    if token_counter is None or max_embedding_tokens is None:
+        return
+
+    for chunk, embedding_text in zip(chunks, embedding_texts, strict=True):
+        token_count = token_counter(embedding_text)
+
+        if token_count > max_embedding_tokens:
+            raise ValueError(
+                f"Embedding input for chunk index {chunk.index} has "
+                f"{token_count} tokens, exceeding the embedding model's "
+                f"{max_embedding_tokens}-token budget. Refusing to silently "
+                "truncate; this indicates the ingestion size guard failed "
+                "to keep this chunk within budget."
+            )
 
 
 class ChunkService:
@@ -50,6 +93,20 @@ class ChunkService:
         embedding_texts = [
             build_embedding_text(chunk.section_path, chunk.content) for chunk in chunks
         ]
+
+        # Final, tokenizer-aware safety net -- see
+        # `validate_embedding_inputs_within_budget`'s docstring. A no-op for
+        # any embedding provider that doesn't expose real token counting.
+        validate_embedding_inputs_within_budget(
+            chunks,
+            embedding_texts,
+            token_counter=getattr(self.embedding_provider, "count_tokens", None),
+            max_embedding_tokens=getattr(
+                self.embedding_provider,
+                "max_embedding_tokens",
+                None,
+            ),
+        )
 
         embeddings = self.embedding_provider.embed_batch(embedding_texts)
 

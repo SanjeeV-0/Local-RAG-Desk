@@ -269,13 +269,36 @@ class IngestionService:
 
                 page_ids[page.page_number] = document_page.id
 
-            # 0.7 similarity threshold and 500 token budget are hard-coded
-            # here, not Settings fields -- changing either requires editing
-            # this call site. They control, respectively, how aggressively
-            # adjacent paragraphs are grouped into one chunk before
-            # splitting, and the final per-chunk size cap (for both prose
-            # and table chunks, which share this one budget).
-            max_chunk_tokens = 500
+            # 0.7 similarity threshold is hard-coded here, not a Settings
+            # field -- it controls how aggressively adjacent paragraphs are
+            # grouped into one chunk before splitting.
+            #
+            # The final per-chunk size cap (for both prose and table
+            # chunks, which share this one budget) is tokenizer-aware when
+            # the configured embedding provider exposes `count_tokens`/
+            # `max_embedding_tokens` (currently
+            # `SentenceTransformerEmbeddingProvider` -- see its module for
+            # what that budget represents and why). A provider without that
+            # capability (e.g. `DeterministicEmbeddingProvider` and other
+            # test fakes) falls back to the previous hard-coded 500
+            # word-estimated cap, completely unchanged, so chunk boundaries
+            # for every such caller are unaffected by this fallback path.
+            token_counter = getattr(self.embedding_provider, "count_tokens", None)
+            max_embedding_tokens = getattr(
+                self.embedding_provider,
+                "max_embedding_tokens",
+                None,
+            )
+
+            if token_counter is not None and max_embedding_tokens is not None:
+                max_chunk_tokens = max_embedding_tokens
+                size_guard_kwargs: dict[str, object] = {
+                    "count_tokens": token_counter,
+                    "reserve_section_path_tokens": True,
+                }
+            else:
+                max_chunk_tokens = 500
+                size_guard_kwargs = {}
 
             structural_units = self.structure_extractor.extract(pages)
 
@@ -289,6 +312,7 @@ class IngestionService:
             structural_units = fragment_table_units(
                 structural_units,
                 max_tokens=max_chunk_tokens,
+                **size_guard_kwargs,
             )
 
             section_nodes = self.section_builder.build(structural_units)
@@ -308,6 +332,7 @@ class IngestionService:
                 semantic_units,
                 section_map=section_map,
                 max_tokens=max_chunk_tokens,
+                **size_guard_kwargs,
             )
 
             await self.chunk_service.persist_chunks(

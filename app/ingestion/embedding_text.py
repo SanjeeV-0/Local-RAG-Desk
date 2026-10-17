@@ -11,6 +11,27 @@ trivially unit-testable and safe to call from a batch/offline job as well as
 the live ingestion path.
 """
 
+
+def section_path_prefix_text(section_path: str | None) -> str:
+    """Return just the prefix portion `build_embedding_text` would add ahead
+    of a chunk's content -- i.e. `build_embedding_text(section_path, "")`
+    reduced to only the part that doesn't depend on content. Empty when
+    there is no section path.
+
+    Used by `app.ingestion.size_guard`/`app.ingestion.table_chunker` to
+    reserve exactly this many tokens of a chunk's embedding-input budget
+    BEFORE splitting its content, so the complete, final
+    `build_embedding_text` output (prefix + content) is guaranteed to fit --
+    see those modules' `reserve_section_path_tokens` parameter. Must stay in
+    exact sync with `build_embedding_text`'s own prefix formatting below.
+    """
+
+    if not section_path:
+        return ""
+
+    return f"{section_path}\n\n"
+
+
 def build_embedding_text(section_path: str | None, content: str) -> str:
     """Return the text to embed for one chunk.
 
@@ -35,15 +56,20 @@ def build_embedding_text(section_path: str | None, content: str) -> str:
     The embedding model's tokenizer truncates from the right (confirmed
     against the configured `sentence-transformers/all-MiniLM-L6-v2`
     tokenizer: `truncation_side == "right"`, `max_seq_length == 256`), so a
-    prefix placed at the front of the text is always preserved; only the
-    tail of an already-oversized chunk's content can be truncated -- the
-    same truncation that already happens today for any sufficiently long
-    chunk, independent of this prefix (chunks are capped at 500
-    whitespace-estimated tokens, which routinely exceeds 256 real
-    wordpiece tokens even without a heading prefix).
+    prefix placed at the front of the text is always preserved first. When
+    the configured embedding provider exposes `count_tokens`/
+    `max_embedding_tokens` (see `app.embeddings.sentence_transformer`),
+    `app.ingestion.size_guard`/`app.ingestion.table_chunker` already reserve
+    room for this prefix and split oversized content BEFORE it ever reaches
+    this function, so the combined output fits the model's real budget
+    without relying on truncation. A provider without that capability falls
+    back to the previous, word-count-estimated chunk sizing, where this
+    prefix is pure, unbudgeted overhead and truncation remains possible.
     """
 
-    if not section_path:
+    prefix = section_path_prefix_text(section_path)
+
+    if not prefix:
         return content
 
-    return f"{section_path}\n\n{content}"
+    return f"{prefix}{content}"
