@@ -1,9 +1,24 @@
 """Turns loader-extracted page text into an ordered list of `StructuralUnit`s
 (HEADING/PARAGRAPH/LIST/TABLE), the first step of the active ingestion
 pipeline (see app.ingestion.service). Regex-based, Markdown-aware: it
-recognizes `#`-style headings, `-`/`*`/numbered list items, and GitHub-
-Flavored-Markdown pipe tables, and tracks a heading stack to build each
-unit's hierarchical `section_path`.
+recognizes `#`-style headings, numbered outline-style headings (e.g.
+"1. Objective", "2.1 Personal Identity"), `-`/`*`/numbered list items, and
+GitHub-Flavored-Markdown pipe tables, and tracks a heading stack to build
+each unit's hierarchical `section_path`.
+
+Numbered headings vs. numbered lists: a numbered line with a nested,
+dot-separated number ("2.1 Title") is always a heading -- ad-hoc lists are
+never numbered that way in practice. A single-level numbered line ("1.
+Title") is structurally identical to a numbered list item ("1. Buy milk"),
+so it is disambiguated by looking for concrete evidence of a numbered
+sequence: a preceding list-marker line (any kind), or the same numbered
+marker recurring later through an unbroken run of list-marker lines (so a
+numbered item with a nested bullet sub-item is still correctly recognized
+as part of its list). A numbered line with neither -- including one merely
+followed by an unrelated bulleted list it introduces -- is a heading. See
+`_is_isolated_single_level_numbered_line` for the one known, accepted
+limitation this heuristic has (a genuine single-item numbered instruction
+with no other list-marker nearby is indistinguishable from a heading).
 
 Table detection is intentionally limited to genuine Markdown pipe-table
 syntax (a header row immediately followed by a `|---|---|`-style separator
@@ -27,7 +42,24 @@ from app.ingestion.table_serializer import table_to_markdown
 
 _HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 
-_LIST_PATTERN = re.compile(r"^(?:[-*+]\s+|\d+[.)]\s+)(.+)$")
+_BULLET_LIST_PATTERN = re.compile(r"^[-*+]\s+(.+)$")
+
+# Multi-level numbered heading, e.g. "2.1 Personal Identity" or
+# "2.1.3 Deeply Nested" -- no trailing punctuation required after the last
+# number segment (that convention collides with the single-level pattern
+# below), and a nested dot-separated number is itself a strong, low-
+# ambiguity signal that this is a section heading: ad-hoc numbered lists are
+# never numbered "2.1", "2.2", ... in practice, only plain outline/section
+# numbering is. Matches are always promoted straight to HEADING -- no
+# adjacency check needed, unlike the single-level case below.
+_NESTED_NUMBERED_HEADING_PATTERN = re.compile(r"^(\d+(?:\.\d+)+)\.?\s+(.+?)\s*$")
+
+# Single-level numbered line, e.g. "1. Objective" or "2) Introduction" --
+# structurally IDENTICAL to a genuine numbered list item ("1. Buy milk"), so
+# a match here is NOT enough on its own to decide heading vs. list; see
+# `_is_isolated_single_level_numbered_line` below, which disambiguates using
+# adjacent lines.
+_SINGLE_LEVEL_NUMBERED_PATTERN = re.compile(r"^(\d+)[.)]\s+(.+?)\s*$")
 
 # A pipe-table row needs at least two cells (i.e. at least one internal `|`
 # with non-empty content on both sides) -- a single bare `|` with nothing
@@ -97,22 +129,72 @@ class StructureExtractor:
                     )
                     paragraph_lines.clear()
 
-                    level = len(heading_match.group(1))
-                    title = heading_match.group(2)
+                    units.append(
+                        self._emit_heading(
+                            page_number=page.page_number,
+                            section_stack=section_stack,
+                            level=len(heading_match.group(1)),
+                            title=heading_match.group(2),
+                        )
+                    )
 
-                    while section_stack and section_stack[-1][0] >= level:
-                        section_stack.pop()
+                    index += 1
+                    continue
 
-                    section_stack.append((level, title))
+                nested_numbered_match = _NESTED_NUMBERED_HEADING_PATTERN.match(stripped)
+
+                if nested_numbered_match:
+                    units.extend(
+                        self._flush_paragraph(
+                            paragraph_lines=paragraph_lines,
+                            page_number=page.page_number,
+                            section_stack=section_stack,
+                            section_counters=section_counters,
+                        )
+                    )
+                    paragraph_lines.clear()
+
+                    number = nested_numbered_match.group(1)
 
                     units.append(
-                        StructuralUnit(
-                            unit_type=UnitType.HEADING,
-                            content=title,
-                            page_numbers=[page.page_number],
-                            section_path=self._section_path(section_stack),
-                            section_level=level,
-                            section_index=0,
+                        self._emit_heading(
+                            page_number=page.page_number,
+                            section_stack=section_stack,
+                            # "2.1" -> level 2, "2.1.3" -> level 3, etc. --
+                            # consistent with Markdown's "more dots/`#`s ==
+                            # deeper nesting" convention, so the same
+                            # section_stack push/pop logic applies unchanged
+                            # regardless of which heading style produced it.
+                            level=number.count(".") + 1,
+                            title=nested_numbered_match.group(2),
+                        )
+                    )
+
+                    index += 1
+                    continue
+
+                single_numbered_match = _SINGLE_LEVEL_NUMBERED_PATTERN.match(stripped)
+
+                if single_numbered_match and self._is_isolated_single_level_numbered_line(
+                    lines=lines,
+                    index=index,
+                ):
+                    units.extend(
+                        self._flush_paragraph(
+                            paragraph_lines=paragraph_lines,
+                            page_number=page.page_number,
+                            section_stack=section_stack,
+                            section_counters=section_counters,
+                        )
+                    )
+                    paragraph_lines.clear()
+
+                    units.append(
+                        self._emit_heading(
+                            page_number=page.page_number,
+                            section_stack=section_stack,
+                            level=1,
+                            title=single_numbered_match.group(2),
                         )
                     )
 
@@ -149,9 +231,21 @@ class StructureExtractor:
                     index = next_index
                     continue
 
-                list_match = _LIST_PATTERN.match(stripped)
+                # `single_numbered_match` was already computed above (and
+                # found NOT isolated, i.e. part of a numbered-list run) if
+                # we reach here with it set -- re-used rather than matched
+                # twice. A bullet match is always unambiguous (bullets are
+                # never headings), so it's matched fresh here.
+                bullet_match = _BULLET_LIST_PATTERN.match(stripped)
+                list_content = (
+                    bullet_match.group(1)
+                    if bullet_match
+                    else single_numbered_match.group(2)
+                    if single_numbered_match
+                    else None
+                )
 
-                if list_match:
+                if list_content is not None:
                     units.extend(
                         self._flush_paragraph(
                             paragraph_lines=paragraph_lines,
@@ -176,7 +270,7 @@ class StructureExtractor:
                     units.append(
                         StructuralUnit(
                             unit_type=UnitType.LIST,
-                            content=list_match.group(1),
+                            content=list_content,
                             page_numbers=[page.page_number],
                             section_path=section_path,
                             section_level=section_level,
@@ -267,6 +361,91 @@ class StructureExtractor:
         )
 
         return unit, cursor
+
+    @staticmethod
+    def _emit_heading(
+        page_number: int,
+        section_stack: list[tuple[int, str]],
+        level: int,
+        title: str,
+    ) -> StructuralUnit:
+        """Push a new heading onto the section stack (popping any
+        same-or-deeper-level entries first) and build its unit. Shared by
+        the Markdown (`#`) and numbered-heading ("1. Title", "2.1 Title")
+        detection branches so both go through identical stack bookkeeping.
+        """
+
+        while section_stack and section_stack[-1][0] >= level:
+            section_stack.pop()
+
+        section_stack.append((level, title))
+
+        return StructuralUnit(
+            unit_type=UnitType.HEADING,
+            content=title,
+            page_numbers=[page_number],
+            section_path=StructureExtractor._section_path(section_stack),
+            section_level=level,
+            section_index=0,
+        )
+
+    @staticmethod
+    def _is_isolated_single_level_numbered_line(lines: list[str], index: int) -> bool:
+        """A single-level numbered line ("1. Title") is a heading unless
+        there is concrete evidence it belongs to a numbered list -- either
+        the PRECEDING line is itself a list marker (this line is a later
+        item, e.g. "2."/"3." continuing a run, possibly mixed with bullets),
+        or the SAME numbered marker pattern recurs later, reachable by
+        scanning forward through an unbroken run of list-marker lines (this
+        line is a numbered item whose own body happens to include a nested
+        bullet sub-item before the next numbered item, e.g. "1. Step one" /
+        "- detail" / "2. Step two").
+
+        This asymmetry (previous: any list marker counts; forward: only a
+        RECURRING numbered marker counts, bullets alone do not) is what
+        correctly tells apart two shapes that otherwise look identical one
+        line at a time:
+          - "1. Requirements" / "- a" / "- b" -- a heading introducing an
+            unrelated bulleted list. The "1." marker never recurs, so this
+            is a heading, not swallowed into the list it introduces.
+          - "1. Step one" / "- detail" / "2. Step two" -- a genuine numbered
+            list whose first item has a nested bullet. The "2." recurrence
+            confirms "1." is really part of the same numbered sequence.
+        Scanning stops at the first blank line or non-list-marker (prose)
+        line, so it never reaches into an unrelated later section.
+
+        Known, accepted limitation: a genuine single-item numbered
+        instruction with no second item and no neighboring list marker at
+        all (e.g. "1. Submit the form." followed only by explanatory prose)
+        is indistinguishable from a heading by any text-only heuristic and
+        will be treated as a heading. No further pattern-matching here can
+        resolve that case reliably.
+        """
+
+        previous_line = lines[index - 1].strip() if index > 0 else ""
+
+        if _BULLET_LIST_PATTERN.match(previous_line) or _SINGLE_LEVEL_NUMBERED_PATTERN.match(
+            previous_line
+        ):
+            return False
+
+        cursor = index + 1
+
+        while cursor < len(lines):
+            candidate = lines[cursor].strip()
+
+            if not candidate:
+                break
+
+            if _SINGLE_LEVEL_NUMBERED_PATTERN.match(candidate):
+                return False
+
+            if not _BULLET_LIST_PATTERN.match(candidate):
+                break
+
+            cursor += 1
+
+        return True
 
     @staticmethod
     def _parse_table_row(line: str) -> list[str]:
