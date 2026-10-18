@@ -198,8 +198,6 @@ async def _run_benchmark_v2() -> None:
                             flush=True,
                         )
 
-                    case_metrics.append(metrics)
-
                     is_breakdown_config = (
                         candidate_limit == BREAKDOWN_CANDIDATE_LIMIT
                         and final_limit == BREAKDOWN_FINAL_LIMIT
