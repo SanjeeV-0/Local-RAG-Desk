@@ -17,6 +17,7 @@ the connection-level settings (`openrouter_api_key`, `openrouter_base_url`,
 not a per-role choice.
 """
 
+import logging
 from functools import lru_cache
 from typing import Literal
 
@@ -51,6 +52,9 @@ def _validate_penalty_range(value: float | None) -> float | None:
         raise ValueError("Penalty values must be between -2.0 and 2.0.")
 
     return value
+
+
+_logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -283,10 +287,26 @@ class Settings(BaseSettings):
     # pinned default above) are reasoning models that can run very long, or
     # even time out, with no cap; a bounded budget also leaves enough room
     # for a structured, multi-part answer without an indefinite wait.
-    openrouter_generation_max_tokens: int | None = 2048
+    #
+    # Confirmed root cause of truncated, incomplete answers (2026-10-18): for
+    # a reasoning model, `max_tokens` is shared between the model's hidden
+    # reasoning/thinking tokens and its visible answer -- the 2048 token
+    # budget this value previously held was frequently exhausted by
+    # reasoning alone on a multi-part question synthesizing 10 retrieved
+    # sources, cutting the visible answer off mid-sentence after little more
+    # than a source-by-source inventory. Raised to give a reasoning model
+    # enough headroom to both think and still produce a complete, coherent
+    # answer; paired with `openrouter_generation_reasoning_effort` below so
+    # the reasoning portion itself doesn't re-consume the larger budget.
+    openrouter_generation_max_tokens: int | None = 4096
     openrouter_generation_top_p: float = 1.0
     openrouter_generation_response_format: dict[str, object] | None = None
-    openrouter_generation_reasoning_effort: str | None = None
+    # "low" caps how much of `max_tokens` a reasoning-capable model spends on
+    # hidden reasoning before writing its visible answer -- see the
+    # `max_tokens` comment above for why this matters together with it. A
+    # non-reasoning model simply ignores this field (OpenRouter passes it
+    # through only to models that support it).
+    openrouter_generation_reasoning_effort: str | None = "low"
     # OpenRouter-specific passthrough -- see the matching decomposition
     # field's comment above; identical contract, independent value.
     openrouter_generation_top_k: int | None = None
@@ -372,6 +392,47 @@ class Settings(BaseSettings):
     # flag only ever removes decomposition calls, never adds them.
     query_router_enabled: bool = False
 
+    # Selects how RetrievalService produces its final, limit-truncated
+    # result order from the reranked candidate pool -- see
+    # `app.retrieval.service`'s module docstring and `app.retrieval.rrf` for
+    # the full explanation. "rerank": the cross-encoder reranker's own score
+    # order alone (this project's PREVIOUS default, before this evaluation).
+    # "rrf" (the current default): fuses that ranking with the pre-rerank
+    # vector-distance ranking via Reciprocal Rank Fusion.
+    #
+    # Chosen as the default based on a 25-question offline evaluation
+    # (tests/evaluation/offline_reranker_diagnostics.py + a direct call to
+    # this module's own fuse_rankings, same corpus/limits used throughout
+    # this project's retrieval evaluations): versus the then-current
+    # "rerank"-only default, "rrf" improved every aggregate metric
+    # (Recall@3 0.760->0.820, Recall@5 0.840->0.860, MRR 0.737->0.768) and
+    # won in 2 of 3 question categories (semantic_retrieval, distractor_heavy),
+    # with a per-question record of 7 improved / 4 regressed / 14 unchanged
+    # relative to "rerank". Caveats, disclosed rather than hidden: n=25 is a
+    # small sample; the smallest category (cross_section, n=4) REGRESSED
+    # under "rrf" (MRR 0.750->0.583); and "rrf" did not clearly beat plain
+    # vector-only search on MRR (0.772 vector-only vs 0.768 "rrf" -- a
+    # negligible difference, and not the comparison this default decision
+    # was based on, since vector-only was never the prior production
+    # default). Fusion overhead is negligible (pure rank arithmetic, no
+    # extra model inference). Revert to "rerank" by setting this one value
+    # if further validation disagrees.
+    retrieval_ranking_strategy: Literal["rerank", "rrf"] = "rrf"
+
+    # The RRF smoothing constant (see app.retrieval.rrf.DEFAULT_RRF_K for the
+    # formula and citation). Irrelevant when retrieval_ranking_strategy is
+    # "rerank". 60 is the conventional literature default, not tuned against
+    # this project's evaluation data.
+    retrieval_rrf_k: int = 60
+
+    @field_validator("retrieval_rrf_k")
+    @classmethod
+    def _validate_retrieval_rrf_k(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("retrieval_rrf_k must be greater than zero.")
+
+        return value
+
     @model_validator(mode="after")
     def _apply_legacy_openrouter_model_fallback(self) -> "Settings":
         """Precedence for the answer-generation model:
@@ -392,10 +453,29 @@ class Settings(BaseSettings):
         `openrouter_decomposition_model` is never touched here -- it keeps
         its own independent default/override regardless of this legacy
         variable, exactly as before this fallback was added.
+
+        Logs one safe warning (the model name only -- never a credential or
+        other secret) whenever this fallback actually fires, so an operator
+        can see in logs that generation is running on a value that was never
+        explicitly reviewed for the generation workload specifically
+        (longer context, explicit `max_tokens`, etc.) -- unlike before,
+        where this silently happened with no observable signal at all. This
+        does not change which model is selected; it only makes an existing,
+        already-silent precedence rule diagnosable.
         """
 
         if "openrouter_generation_model" not in self.model_fields_set and self.openrouter_model:
             self.openrouter_generation_model = self.openrouter_model
+            _logger.warning(
+                "OPENROUTER_GENERATION_MODEL is not set; falling back to the "
+                "legacy OPENROUTER_MODEL value (%r) for answer generation. "
+                "This value may not have been reviewed for the generation "
+                "workload (which sends a longer prompt and an explicit "
+                "max_tokens, unlike lighter-weight calls such as query "
+                "decomposition) -- set OPENROUTER_GENERATION_MODEL explicitly "
+                "to silence this warning and confirm the intended model.",
+                self.openrouter_generation_model,
+            )
 
         return self
 

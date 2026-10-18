@@ -182,6 +182,47 @@ def test_explicit_generation_model_matching_default_is_not_overridden_by_legacy(
     assert settings.openrouter_generation_model == default_model
 
 
+def test_legacy_fallback_logs_a_warning_identifying_the_mismatch(caplog) -> None:
+    """The legacy fallback firing is a real, previously-silent condition
+    that can cause generation to run on a model never reviewed for the
+    generation workload -- this is exactly the scenario this test
+    guards against regressing back to silent."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="app.config.settings"):
+        _settings(openrouter_model="legacy-vendor/legacy-model:free")
+
+    assert any(
+        "OPENROUTER_GENERATION_MODEL is not set" in record.message for record in caplog.records
+    )
+    assert any("legacy-vendor/legacy-model:free" in record.message for record in caplog.records)
+
+
+def test_no_warning_when_generation_model_is_explicitly_set(caplog) -> None:
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="app.config.settings"):
+        _settings(
+            openrouter_model="legacy-vendor/legacy-model:free",
+            openrouter_generation_model="explicit-vendor/explicit-model:free",
+        )
+
+    assert not any(
+        "OPENROUTER_GENERATION_MODEL is not set" in record.message for record in caplog.records
+    )
+
+
+def test_no_warning_when_legacy_variable_is_unset(caplog) -> None:
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="app.config.settings"):
+        _settings()
+
+    assert not any(
+        "OPENROUTER_GENERATION_MODEL is not set" in record.message for record in caplog.records
+    )
+
+
 def test_legacy_openrouter_model_does_not_affect_decomposition_model() -> None:
     """`OPENROUTER_DECOMPOSITION_MODEL` must remain fully independent of the
     legacy `OPENROUTER_MODEL` fallback -- it keeps its own default/override
@@ -319,6 +360,40 @@ def test_retrieval_candidate_limit_floor_accepts_valid_values(value: int) -> Non
 def test_retrieval_candidate_limit_floor_rejects_out_of_range_values(value: int) -> None:
     with pytest.raises(ValidationError, match="retrieval_candidate_limit_floor must be between"):
         _settings(retrieval_candidate_limit_floor=value)
+
+
+def test_retrieval_ranking_strategy_default_is_rrf() -> None:
+    """Chosen based on the 25-question offline evaluation -- see the field's
+    own comment in app.config.settings for the exact measured numbers."""
+    assert _settings().retrieval_ranking_strategy == "rrf"
+
+
+@pytest.mark.parametrize("value", ["rerank", "rrf"])
+def test_retrieval_ranking_strategy_accepts_valid_values(value: str) -> None:
+    assert _settings(retrieval_ranking_strategy=value).retrieval_ranking_strategy == value
+
+
+def test_retrieval_ranking_strategy_rejects_invalid_value() -> None:
+    """Enforced by the field's own Literal type -- no redundant custom
+    validator, matching this file's existing Literal-typed settings
+    (e.g. hnsw_iterative_scan)."""
+    with pytest.raises(ValidationError, match="retrieval_ranking_strategy"):
+        _settings(retrieval_ranking_strategy="not-a-real-strategy")
+
+
+def test_retrieval_rrf_k_default_matches_the_standard_literature_constant() -> None:
+    assert _settings().retrieval_rrf_k == 60
+
+
+@pytest.mark.parametrize("value", [1, 60, 1000])
+def test_retrieval_rrf_k_accepts_valid_values(value: int) -> None:
+    assert _settings(retrieval_rrf_k=value).retrieval_rrf_k == value
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_retrieval_rrf_k_rejects_non_positive_values(value: int) -> None:
+    with pytest.raises(ValidationError, match="retrieval_rrf_k must be greater than zero"):
+        _settings(retrieval_rrf_k=value)
 
 
 def test_research_ask_result_limit_default_matches_previous_literal() -> None:

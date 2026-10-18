@@ -157,6 +157,8 @@ async def get_retrieval_service(
         query_decomposer=query_decomposer,
         candidate_limit_floor=settings.retrieval_candidate_limit_floor,
         router_enabled=settings.query_router_enabled,
+        ranking_strategy=settings.retrieval_ranking_strategy,
+        rrf_k=settings.retrieval_rrf_k,
     )
 
 

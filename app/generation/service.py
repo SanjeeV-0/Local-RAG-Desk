@@ -26,6 +26,12 @@ class GenerationResult:
     output_tokens: int | None = None
     total_tokens: int | None = None
     answer_redacted: bool = False
+    # The provider's own completion-stop reason (e.g. `"stop"`, `"length"`),
+    # when exposed -- `"length"` means the response was cut off by
+    # `max_tokens`, not that the model chose to stop; surfaced so an
+    # incomplete answer can be diagnosed as a budget problem rather than a
+    # content/quality one. `None` for a provider that doesn't expose it.
+    finish_reason: str | None = None
 
 
 class GenerationProvider(Protocol):

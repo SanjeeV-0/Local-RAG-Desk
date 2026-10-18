@@ -1,5 +1,5 @@
 """The retrieval pipeline: decomposition -> per-query vector search -> merge
--> global rerank -> Top K (-> optional trace capture).
+-> global rerank (and/or RRF fusion) -> Top K (-> optional trace capture).
 
 This is the one and only retrieval implementation in the application --
 both `POST /retrieval/search` (the debugging "Retrieval Explorer") and
@@ -12,8 +12,25 @@ NOT own the HTTP contract (see `app.api.retrieval` / `app.api.research`).
 Key invariant verified by `tests/unit/test_retrieval_decomposition.py`:
 decomposition and retrieval run identically regardless of `trace` -- the
 `trace` flag only controls whether `self.last_trace` is populated.
+
+`ranking_strategy` selects how the final, limit-truncated result order is
+produced from the reranked candidate pool:
+  - `"rerank"` (default -- today's exact, unchanged behavior): the
+    cross-encoder reranker's own score order, truncated to `limit`.
+  - `"rrf"`: Reciprocal Rank Fusion (`app.retrieval.rrf.fuse_rankings`)
+    combining the pre-rerank vector-distance ranking with the post-rerank
+    cross-encoder ranking, truncated to `limit` only AFTER fusion. See
+    `app.retrieval.rrf`'s module docstring for the formula and the
+    deterministic tie-break rule. Vector rank, for both single-query and
+    decomposed-query retrieval, is defined identically either way: a
+    chunk's 1-indexed position in `candidates` -- the ALREADY-MERGED,
+    already-distance-sorted pool produced by the existing per-sub-query
+    merge step below (best/lowest distance wins across sub-queries,
+    unchanged). RRF never alters that merge policy; it only consumes its
+    output as one of its two input rankings.
 """
 
+from typing import Literal
 from uuid import UUID
 
 from app.core.repositories.document import DocumentRepository
@@ -30,11 +47,14 @@ from app.retrieval.models import RetrievedChunk
 from app.retrieval.query_decomposer import QueryDecomposer
 from app.retrieval.query_router import should_decompose
 from app.retrieval.reranker import Reranker
+from app.retrieval.rrf import DEFAULT_RRF_K, fuse_rankings
 from app.retrieval.trace import (
     RetrievalTrace,
     RetrievalTraceCandidate,
     RetrievalTraceContext,
 )
+
+RankingStrategy = Literal["rerank", "rrf"]
 
 
 class RetrievalService:
@@ -49,6 +69,8 @@ class RetrievalService:
         query_decomposer: QueryDecomposer | None = None,
         candidate_limit_floor: int = 50,
         router_enabled: bool = False,
+        ranking_strategy: RankingStrategy = "rerank",
+        rrf_k: int = DEFAULT_RRF_K,
     ) -> None:
         self.repository = repository
         self.embedding_provider = embedding_provider
@@ -68,6 +90,16 @@ class RetrievalService:
         # Settings-backed via `Settings.retrieval_candidate_limit_floor` in
         # production (see app.core.dependencies.get_retrieval_service).
         self.candidate_limit_floor = candidate_limit_floor
+        # Defaults to "rerank" -- today's exact, unchanged behavior for
+        # every existing caller/test that doesn't pass this argument.
+        # Settings-backed via `Settings.retrieval_ranking_strategy` in
+        # production (see app.core.dependencies.get_retrieval_service and
+        # this module's own docstring for what "rrf" changes).
+        self.ranking_strategy = ranking_strategy
+        # Defaults to the standard RRF smoothing constant (60); irrelevant
+        # when `ranking_strategy="rerank"`. Settings-backed via
+        # `Settings.retrieval_rrf_k`.
+        self.rrf_k = rrf_k
         self.last_trace: RetrievalTrace | None = None
         # Set on every `search()` call (unlike `last_trace`, which is only
         # populated when `trace=True`) so the router's decision can be
@@ -323,6 +355,14 @@ class RetrievalService:
             merged_candidates.values(),
             key=lambda chunk: chunk.distance,
         )
+        # Note for `ranking_strategy="rrf"` below: this sort is already
+        # fully deterministic on a distance tie -- `sorted()` is stable, and
+        # `merged_candidates.values()`'s iteration order is itself
+        # deterministic (insertion order, driven by the fixed order
+        # `retrieval_queries` is processed in and the repository's own
+        # deterministic result order), so no additional tie-break key is
+        # needed here. `fuse_rankings` assigns vector rank from this list's
+        # position, so it inherits that same determinism unchanged.
         deduplicated_candidate_count = len(merged_candidates)
 
         if self.reranker is None:
@@ -338,7 +378,18 @@ class RetrievalService:
                 candidates,
             )
 
-            final_results = reranked[:limit]
+            if self.ranking_strategy == "rrf":
+                # Fuse the pre-rerank vector ranking (`candidates`) with the
+                # post-rerank cross-encoder ranking (`reranked`) -- both are
+                # orderings of the exact same deduplicated pool, so
+                # `fuse_rankings` can always find a matching rank for every
+                # chunk in both (see its own ValueError guards for what
+                # happens if that invariant is ever violated by a future
+                # reranker implementation). Truncation to `limit` happens
+                # only AFTER fusion, never before.
+                final_results = fuse_rankings(candidates, reranked, k=self.rrf_k)[:limit]
+            else:
+                final_results = reranked[:limit]
 
         if trace:
             # `candidates` here is the deduplicated pool BEFORE reranking, so

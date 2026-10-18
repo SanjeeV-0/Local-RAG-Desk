@@ -98,6 +98,7 @@ class GenerationService:
                         "text": result.text,
                         "answer_redacted": result.answer_redacted,
                         "model": result.model,
+                        "finish_reason": result.finish_reason,
                         "usage": {
                             "input_tokens": result.input_tokens,
                             "output_tokens": result.output_tokens,
@@ -109,9 +110,37 @@ class GenerationService:
                 return result
 
             except ProviderUnavailableError as exc:
+                # Safe, allowlisted failure metadata only -- never the raw
+                # exception text or provider response body (see
+                # `app.generation.errors.wrap_openai_exception`, the only
+                # place that sets `http_status`/`provider_error_code`/
+                # `provider_error_type`/`sanitized_provider_message`; the
+                # last of these is already redacted of credential-shaped
+                # substrings and PII, and length-capped, before it ever
+                # reaches this object -- never re-sanitized or re-read here).
+                # `model`/`request_parameters` are the CONFIGURED,
+                # already-safe values (never secrets, never request
+                # content) -- read via `getattr` since `GenerationProvider`
+                # is a `Protocol` that guarantees neither attribute; `None`
+                # here means "not exposed by this provider implementation",
+                # never a fabricated value.
                 observation.update(
                     level="ERROR",
                     status_message=exc.category.value,
+                    output={
+                        "category": exc.category.value,
+                        "retryable": exc.retryable,
+                        "http_status": exc.http_status,
+                        "provider_error_code": exc.provider_error_code,
+                        "provider_error_type": exc.provider_error_type,
+                        "provider_message": exc.sanitized_provider_message,
+                        "model": getattr(self.provider, "model", None),
+                        "request_parameters": getattr(
+                            self.provider,
+                            "describe_request_parameters",
+                            lambda: None,
+                        )(),
+                    },
                 )
                 raise
 
@@ -121,5 +150,9 @@ class GenerationService:
                 observation.update(
                     level="ERROR",
                     status_message=exc.__class__.__name__,
+                    output={
+                        "category": exc.__class__.__name__,
+                        "model": getattr(self.provider, "model", None),
+                    },
                 )
                 raise

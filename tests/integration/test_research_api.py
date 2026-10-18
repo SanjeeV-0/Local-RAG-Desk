@@ -406,6 +406,18 @@ class _GuardrailRejectingGenerationService:
         raise ProviderUnavailableError(ProviderErrorCategory.GUARDRAIL_OR_POLICY_REJECTION)
 
 
+class _AuthConfigRejectingGenerationService:
+    """Simulates the real failure mode behind the UI's
+    'authentication_or_configuration_error' banner (e.g. a misconfigured or
+    rejected OpenRouter model for generation) -- distinct from a guardrail
+    rejection, but the fallback/502 handling in `_execute_research` must
+    behave identically for both categories, since neither is retryable and
+    neither should ever discard already-retrieved, safe sources."""
+
+    async def generate(self, query: str, context: GenerationContext) -> GenerationResult:
+        raise ProviderUnavailableError(ProviderErrorCategory.AUTHENTICATION_OR_CONFIG)
+
+
 class _EmptyRetrievalService(FakeRetrievalService):
     """Retrieval succeeds but finds nothing -- there is no safe content to
     fall back to if generation then fails."""
@@ -495,6 +507,76 @@ async def test_research_ask_guardrail_rejection_with_sources_returns_extractive_
         assert body["redaction"]["redaction_applied"] is False
         assert body["redaction"]["affected_source_count"] == 0
         assert body["redaction"]["possibly_incomplete"] is False
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_research_ask_auth_config_rejection_with_no_sources_returns_safe_502() -> None:
+    """Root-cause regression test for the UI's observed
+    'authentication_or_configuration_error' banner: when retrieval found
+    nothing and generation then fails with this category, the response
+    must still be a clear, safe 502 -- never a generic 500, and never raw
+    provider details -- identically to a guardrail rejection."""
+
+    app.dependency_overrides[get_retrieval_service] = lambda: _EmptyRetrievalService()
+    app.dependency_overrides[get_generation_service] = lambda: (
+        _AuthConfigRejectingGenerationService()
+    )
+
+    try:
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/research/ask", json={"query": "What is RAG?"})
+
+        assert response.status_code == 502
+        body = response.json()
+
+        assert body["detail"]["error"]["category"] == "authentication_or_configuration_error"
+        assert body["detail"]["error"]["retryable"] is False
+        assert "message" in body["detail"]["error"]
+        assert "Traceback" not in str(body)
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_research_ask_auth_config_rejection_with_sources_returns_extractive_fallback() -> (
+    None
+):
+    """The exact bug report this test guards against regressing: the UI
+    showed 'authentication_or_configuration_error' and an extractive
+    fallback instead of a generated answer -- that fallback behavior is
+    CORRECT and must be preserved (never silently retried, never discard
+    already-safe sources), for this category exactly as for a guardrail
+    rejection."""
+
+    app.dependency_overrides[get_retrieval_service] = lambda: FakeRetrievalService()
+    app.dependency_overrides[get_generation_service] = lambda: (
+        _AuthConfigRejectingGenerationService()
+    )
+
+    try:
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/research/ask", json={"query": "What is RAG?"})
+
+        assert response.status_code == 200
+        body = response.json()
+
+        assert body["partial"] is True
+        assert body["answer_method"] == "extractive_fallback"
+        assert body["answer"] is not None
+        assert "RAG retrieves relevant information before generation." in body["answer"]
+        assert body["model"] is None
+        assert body["generation_error"]["category"] == "authentication_or_configuration_error"
+        assert body["generation_error"]["retryable"] is False
+        assert "message" in body["generation_error"]
+        assert "Traceback" not in str(body)
 
     finally:
         app.dependency_overrides.clear()

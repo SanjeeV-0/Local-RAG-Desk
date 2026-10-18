@@ -79,7 +79,7 @@ async def test_system_prompt_requests_evidence_driven_structure_not_fixed_templa
     provider,
 ) -> None:
     """The system prompt must guide the model toward structuring its answer
-    around the actual question/evidence (optional, evidence-gated sections)
+    around the actual question/evidence (optional, evidence-gated content)
     rather than hardcoding a fixed set of sections into every answer, and
     must forbid overclaiming how many sources were actually reviewed."""
 
@@ -95,8 +95,7 @@ async def test_system_prompt_requests_evidence_driven_structure_not_fixed_templa
     content = system_message["content"]
 
     # Structure follows the question/evidence -- not a mandatory template.
-    assert "rather than a fixed template" in content
-    assert "Only include a section if the context actually supports it" in content
+    assert "Only include something if the context actually supports it" in content
 
     # Anti-overclaiming instruction (never claim more documents/sources
     # were reviewed than were actually provided).
@@ -104,6 +103,31 @@ async def test_system_prompt_requests_evidence_driven_structure_not_fixed_templa
 
     # Still forbids inventing unsupported facts.
     assert "never invent facts" in content.lower()
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_forbids_source_by_source_enumeration(provider) -> None:
+    """Regression for the 'reads like a source inventory' bug: the model
+    was mirroring the [Source N] blocks it was given as an outline for its
+    own answer. The system prompt must explicitly instruct synthesis across
+    sources in natural prose, organized around the question -- not a
+    mechanical per-source rundown -- and must scope citations to specific
+    provenance points rather than a running per-sentence label."""
+
+    provider.client.chat.completions.create.return_value = make_response("An answer.")
+
+    context = ContextAssembler().assemble([])
+
+    await provider.generate(query="What is RAG?", context=context)
+
+    call = provider.client.chat.completions.create.await_args
+    content = call.kwargs["messages"][0]["content"]
+
+    assert "not a source-by-source report" in content
+    assert "NOT an outline to follow" in content
+    assert "synthesize" in content.lower()
+    assert "organize the answer around the user's question" in content.lower()
+    assert "never as the answer's organizing structure" in content.lower()
 
 
 @pytest.mark.asyncio
@@ -144,6 +168,35 @@ async def test_includes_optional_fields_when_configured() -> None:
     assert call.kwargs["max_tokens"] == 256
     assert call.kwargs["response_format"] == {"type": "json_object"}
     assert call.kwargs["reasoning_effort"] == "medium"
+
+
+@pytest.mark.asyncio
+async def test_finish_reason_is_surfaced_on_the_result(provider) -> None:
+    """Regression for the incomplete/truncated-answer bug: the provider's
+    own stop reason (`"length"` means cut off by `max_tokens`, not that the
+    model chose to stop) must reach `GenerationResult` so a truncated answer
+    is diagnosable, not silently indistinguishable from a complete one."""
+    response = make_response("This answer was cut off mid-sent")
+    response.choices[0].finish_reason = "length"
+    provider.client.chat.completions.create.return_value = response
+
+    context = ContextAssembler().assemble([])
+    result = await provider.generate(query="What is RAG?", context=context)
+
+    assert result.finish_reason == "length"
+
+
+@pytest.mark.asyncio
+async def test_finish_reason_defaults_to_none_when_not_exposed(provider) -> None:
+    """A response shape that never set `finish_reason` at all (e.g. an
+    older/minimal mock, or a provider that omits it) must yield `None`,
+    never raise -- `getattr` with a default, not a direct attribute read."""
+    provider.client.chat.completions.create.return_value = make_response("An answer.")
+
+    context = ContextAssembler().assemble([])
+    result = await provider.generate(query="What is RAG?", context=context)
+
+    assert result.finish_reason is None
 
 
 @pytest.mark.asyncio
