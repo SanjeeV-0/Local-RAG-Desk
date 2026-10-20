@@ -41,6 +41,7 @@ const SUCCESSFUL_RESPONSE: RetrievalSearchResponse = {
       distance: 0.12,
       similarity: 0.88,
       rerank_score: 0.75,
+      matched_sub_queries: ['a query'],
     },
   ],
   decomposition: {
@@ -146,8 +147,13 @@ describe('RetrievalWorkspace decomposition outcome (no Trace Mode)', () => {
         expect(screen.getByText(reason!)).toBeInTheDocument();
       }
       if (status === 'decomposed') {
-        expect(screen.getByText('sub a')).toBeInTheDocument();
-        expect(screen.getByText('sub b')).toBeInTheDocument();
+        // Appears twice when decomposition produced more than one
+        // sub-query: once in this always-visible summary, and again as an
+        // interactive chip in the "Filter by Sub-query" control -- both are
+        // legitimate, so this tolerates either rather than assuming exactly
+        // one occurrence.
+        expect(screen.getAllByText('sub a').length).toBeGreaterThan(0);
+        expect(screen.getAllByText('sub b').length).toBeGreaterThan(0);
       }
     },
   );
@@ -633,5 +639,198 @@ describe('RetrievalWorkspace candidate-limit control', () => {
     expect(
       screen.getByText('Candidate Limit per Subquery (optional)', { selector: 'label' }),
     ).toBeInTheDocument();
+  });
+});
+
+describe('RetrievalWorkspace sub-query filter', () => {
+  const DECOMPOSED_RESPONSE: RetrievalSearchResponse = {
+    results: [
+      {
+        document_id: 'doc-1',
+        chunk_id: 'chunk-a',
+        section_id: 'section-1',
+        section_path: 'Intro',
+        page_numbers: [1],
+        content: 'Content retrieved only by sub a',
+        distance: 0.1,
+        similarity: 0.9,
+        rerank_score: 0.8,
+        matched_sub_queries: ['sub a'],
+      },
+      {
+        document_id: 'doc-1',
+        chunk_id: 'chunk-b',
+        section_id: 'section-2',
+        section_path: 'Background',
+        page_numbers: [2],
+        content: 'Content retrieved only by sub b',
+        distance: 0.2,
+        similarity: 0.8,
+        rerank_score: 0.6,
+        matched_sub_queries: ['sub b'],
+      },
+      {
+        document_id: 'doc-1',
+        chunk_id: 'chunk-both',
+        section_id: 'section-3',
+        section_path: 'Overlap',
+        page_numbers: [3],
+        content: 'Content retrieved by both sub-queries',
+        distance: 0.15,
+        similarity: 0.85,
+        rerank_score: 0.7,
+        matched_sub_queries: ['sub a', 'sub b'],
+      },
+    ],
+    decomposition: {
+      original_query: 'original query',
+      sub_queries: ['sub a', 'sub b'],
+      status: 'decomposed',
+      reason: null,
+    },
+    redaction: {
+      redaction_applied: false,
+      affected_source_count: 0,
+      answer_redacted: false,
+      possibly_incomplete: false,
+    },
+    trace_requested: false,
+    trace_available: false,
+    trace_unavailable_reason: null,
+    trace: null,
+  };
+
+  const runSearch = async (user: ReturnType<typeof userEvent.setup>) => {
+    const textarea = screen.getByPlaceholderText(/Enter search query/i);
+    await user.type(textarea, 'original query');
+    await user.click(screen.getByRole('button', { name: /Execute Vector Retrieval/i }));
+    await waitFor(() => expect(screen.getByText('Filter by Sub-query')).toBeInTheDocument());
+  };
+
+  it('does not show the filter when decomposition produced only one sub-query', async () => {
+    const user = userEvent.setup();
+    const mocked = vi.mocked(searchRetrievedChunks);
+    mocked.mockResolvedValue(SUCCESSFUL_RESPONSE);
+
+    render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
+
+    const textarea = screen.getByPlaceholderText(/Enter search query/i);
+    await user.type(textarea, 'a query');
+    await user.click(screen.getByRole('button', { name: /Execute Vector Retrieval/i }));
+
+    await waitFor(() => expect(screen.getByText('Some retrieved content')).toBeInTheDocument());
+    expect(screen.queryByText('Filter by Sub-query')).not.toBeInTheDocument();
+  });
+
+  it('shows every chunk, unfiltered, before any sub-query is selected', async () => {
+    const user = userEvent.setup();
+    vi.mocked(searchRetrievedChunks).mockResolvedValue(DECOMPOSED_RESPONSE);
+
+    render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
+    await runSearch(user);
+
+    expect(screen.getByText('Content retrieved only by sub a')).toBeInTheDocument();
+    expect(screen.getByText('Content retrieved only by sub b')).toBeInTheDocument();
+    expect(screen.getByText('Content retrieved by both sub-queries')).toBeInTheDocument();
+  });
+
+  it('selecting one sub-query shows only chunks it retrieved, including shared ones', async () => {
+    const user = userEvent.setup();
+    vi.mocked(searchRetrievedChunks).mockResolvedValue(DECOMPOSED_RESPONSE);
+
+    render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
+    await runSearch(user);
+
+    await user.click(screen.getByRole('button', { name: 'sub a' }));
+
+    expect(screen.getByText('Content retrieved only by sub a')).toBeInTheDocument();
+    expect(screen.getByText('Content retrieved by both sub-queries')).toBeInTheDocument();
+    expect(screen.queryByText('Content retrieved only by sub b')).not.toBeInTheDocument();
+  });
+
+  it('selecting a second sub-query is additive (OR), not a replacement', async () => {
+    const user = userEvent.setup();
+    vi.mocked(searchRetrievedChunks).mockResolvedValue(DECOMPOSED_RESPONSE);
+
+    render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
+    await runSearch(user);
+
+    await user.click(screen.getByRole('button', { name: 'sub a' }));
+    await user.click(screen.getByRole('button', { name: 'sub b' }));
+
+    expect(screen.getByText('Content retrieved only by sub a')).toBeInTheDocument();
+    expect(screen.getByText('Content retrieved only by sub b')).toBeInTheDocument();
+    expect(screen.getByText('Content retrieved by both sub-queries')).toBeInTheDocument();
+  });
+
+  it('deselecting a sub-query restores chunks it had filtered out', async () => {
+    const user = userEvent.setup();
+    vi.mocked(searchRetrievedChunks).mockResolvedValue(DECOMPOSED_RESPONSE);
+
+    render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
+    await runSearch(user);
+
+    const subAButton = screen.getByRole('button', { name: 'sub a' });
+    await user.click(subAButton);
+    expect(screen.queryByText('Content retrieved only by sub b')).not.toBeInTheDocument();
+
+    await user.click(subAButton);
+    expect(screen.getByText('Content retrieved only by sub b')).toBeInTheDocument();
+  });
+
+  it('the Clear button resets the filter back to showing every chunk', async () => {
+    const user = userEvent.setup();
+    vi.mocked(searchRetrievedChunks).mockResolvedValue(DECOMPOSED_RESPONSE);
+
+    render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
+    await runSearch(user);
+
+    await user.click(screen.getByRole('button', { name: 'sub a' }));
+    await user.click(screen.getByRole('button', { name: /Clear/i }));
+
+    expect(screen.getByText('Content retrieved only by sub a')).toBeInTheDocument();
+    expect(screen.getByText('Content retrieved only by sub b')).toBeInTheDocument();
+    expect(screen.getByText('Content retrieved by both sub-queries')).toBeInTheDocument();
+  });
+
+  it('resets the filter selection when a new search is run', async () => {
+    const user = userEvent.setup();
+    vi.mocked(searchRetrievedChunks).mockResolvedValue(DECOMPOSED_RESPONSE);
+
+    render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
+    await runSearch(user);
+
+    await user.click(screen.getByRole('button', { name: 'sub a' }));
+    expect(screen.queryByText('Content retrieved only by sub b')).not.toBeInTheDocument();
+
+    // Re-running the search (even with the same mocked response) must not
+    // carry the previous selection forward -- a fresh response's results
+    // should start fully unfiltered.
+    await user.click(screen.getByRole('button', { name: /Execute Vector Retrieval/i }));
+    await waitFor(() => expect(screen.getByText('Filter by Sub-query')).toBeInTheDocument());
+
+    expect(screen.getByText('Content retrieved only by sub b')).toBeInTheDocument();
+  });
+
+  it('shows a distinct empty state when the filter matches no chunks', async () => {
+    const user = userEvent.setup();
+    vi.mocked(searchRetrievedChunks).mockResolvedValue({
+      ...DECOMPOSED_RESPONSE,
+      decomposition: {
+        ...DECOMPOSED_RESPONSE.decomposition,
+        sub_queries: ['sub a', 'sub b', 'sub c'],
+      },
+    });
+
+    render(<RetrievalWorkspace traceEnabled={false} routerEnabled={false} />);
+    await runSearch(user);
+
+    // "sub c" retrieved nothing in this fixture -- selecting only it should
+    // filter every chunk out, distinctly from "no chunks were retrieved at
+    // all".
+    await user.click(screen.getByRole('button', { name: 'sub c' }));
+
+    expect(screen.getByText('No Chunks Match Selected Sub-queries')).toBeInTheDocument();
+    expect(screen.queryByText('No Chunks Matched')).not.toBeInTheDocument();
   });
 });

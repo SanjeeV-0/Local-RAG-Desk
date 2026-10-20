@@ -42,6 +42,7 @@ import {
   Terminal,
   X,
   XCircle,
+  Filter,
 } from 'lucide-react';
 
 interface RetrievalWorkspaceProps {
@@ -81,6 +82,15 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
   const [documentFilterText, setDocumentFilterText] = useState('');
   const [sectionIdFilter, setSectionIdFilter] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(!!initialDocumentId);
+  // Client-side, post-response filter: narrows the already-fetched
+  // `response.results` down to chunks whose `matched_sub_queries` includes
+  // at least one of these. Empty means "no filter, show everything" --
+  // this is additive with the request-level Document/Section filters
+  // above, never a replacement for them (both apply to the SAME result
+  // set, just at different stages: server-side before the response comes
+  // back, this one client-side after). Reset on every new search, since
+  // the previous response's sub-queries may not exist in the next one.
+  const [selectedSubQueries, setSelectedSubQueries] = useState<string[]>([]);
 
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -215,6 +225,26 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
 
   const retrievalRequest = useCancellableRequest();
 
+  const toggleSubQueryFilter = (subQuery: string) => {
+    setSelectedSubQueries((current) =>
+      current.includes(subQuery)
+        ? current.filter((sq) => sq !== subQuery)
+        : [...current, subQuery]
+    );
+  };
+
+  // Chunks whose `matched_sub_queries` includes at least one selected
+  // sub-query (OR semantics across the selection) -- or every result,
+  // unfiltered, when nothing is selected.
+  const filteredResults = useMemo(() => {
+    if (!response) return [];
+    if (selectedSubQueries.length === 0) return response.results;
+
+    return response.results.filter((chunk) =>
+      chunk.matched_sub_queries?.some((sq) => selectedSubQueries.includes(sq))
+    );
+  }, [response, selectedSubQueries]);
+
   const handleSearch = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!query.trim() || isLoading) return;
@@ -224,6 +254,9 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
     setIsLoading(true);
     setError(null);
     setIsCancelled(false);
+    // A previous response's sub-queries are meaningless against this new
+    // request's results -- never carry a stale selection forward.
+    setSelectedSubQueries([]);
 
     const payload: RetrievalSearchRequest = {
       query: query.trim(),
@@ -560,11 +593,81 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
         </div>
       )}
 
+      {/* Per-sub-query filter -- available whenever decomposition actually
+          produced more than one sub-query, independent of Trace Mode (the
+          attribution lives on `response.results[].matched_sub_queries`,
+          not only in the trace). Purely a client-side narrowing of the
+          already-fetched results -- it never triggers a new request, and
+          combines with the Document/Section filters above (both narrow the
+          same result set, just at different stages). */}
+      {response?.decomposition && response.decomposition.sub_queries.length > 1 && (
+        <div className="glass-card" style={{ padding: '1rem 1.5rem', marginBottom: '1.5rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <Filter size={14} color="#818cf8" />
+              <h3 style={{ fontSize: '0.85rem', fontWeight: 700, color: '#f8fafc' }}>
+                Filter by Sub-query
+              </h3>
+            </div>
+            {selectedSubQueries.length > 0 && (
+              <button
+                type="button"
+                className="btn-ghost"
+                style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem' }}
+                onClick={() => setSelectedSubQueries([])}
+              >
+                <X size={12} /> Clear ({selectedSubQueries.length})
+              </button>
+            )}
+          </div>
+          <div style={{ fontSize: '0.72rem', color: '#64748b', marginBottom: '0.6rem' }}>
+            Select one or more sub-queries to show only the chunks their vector search
+            retrieved -- combines with the Document/Section filters above. Leave none
+            selected to see every result.
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
+            {response.decomposition.sub_queries.map((subQuery, idx) => {
+              const isSelected = selectedSubQueries.includes(subQuery);
+              return (
+                <button
+                  key={idx}
+                  type="button"
+                  onClick={() => toggleSubQueryFilter(subQuery)}
+                  aria-pressed={isSelected}
+                  style={{
+                    fontSize: '0.75rem',
+                    padding: '0.25rem 0.65rem',
+                    borderRadius: 9999,
+                    cursor: 'pointer',
+                    fontWeight: isSelected ? 700 : 400,
+                    color: isSelected ? '#0f172a' : '#a5b4fc',
+                    background: isSelected ? '#818cf8' : 'rgba(99, 102, 241, 0.12)',
+                    border: `1px solid ${isSelected ? '#818cf8' : 'rgba(99, 102, 241, 0.25)'}`,
+                  }}
+                >
+                  {subQuery}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Results Header / Stats */}
       {response && (
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem', padding: '0 0.5rem' }}>
           <div style={{ fontSize: '0.85rem', color: '#94a3b8' }}>
-            Found <strong style={{ color: '#f8fafc' }}>{response.results.length}</strong> matching chunks
+            {selectedSubQueries.length > 0 ? (
+              <>
+                Showing <strong style={{ color: '#f8fafc' }}>{filteredResults.length}</strong> of{' '}
+                <strong style={{ color: '#f8fafc' }}>{response.results.length}</strong> matching chunks
+                {' '}(filtered by {selectedSubQueries.length} sub-quer{selectedSubQueries.length === 1 ? 'y' : 'ies'})
+              </>
+            ) : (
+              <>
+                Found <strong style={{ color: '#f8fafc' }}>{response.results.length}</strong> matching chunks
+              </>
+            )}
             {response.trace_available && response.trace && (
               <span style={{ marginLeft: '0.75rem', color: '#06b6d4' }}>
                 (from {response.trace.candidate_limit} pgvector candidates)
@@ -728,8 +831,8 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
               Filtering to current READY versions and applying cosine similarity.
             </p>
           </div>
-        ) : response && response.results.length > 0 ? (
-          response.results.map((chunk: RetrievedChunkResponse, idx: number) => {
+        ) : response && filteredResults.length > 0 ? (
+          filteredResults.map((chunk: RetrievedChunkResponse, idx: number) => {
             const isExpanded = expandedChunkId === chunk.chunk_id;
             const pagesText = chunk.page_numbers?.length ? chunk.page_numbers.join(', ') : 'N/A';
             const similarityPercent = (chunk.similarity * 100).toFixed(1);
@@ -761,6 +864,29 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
                           </span>
                         )}
                       </div>
+                      {/* Which sub-query(ies) retrieved this chunk -- only
+                          meaningful (and only shown) when decomposition
+                          actually produced more than one. */}
+                      {(response.decomposition?.sub_queries.length ?? 0) > 1 &&
+                        chunk.matched_sub_queries?.length > 0 && (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', marginTop: '0.4rem' }}>
+                            {chunk.matched_sub_queries.map((subQuery, sqIdx) => (
+                              <span
+                                key={sqIdx}
+                                style={{
+                                  fontSize: '0.66rem',
+                                  color: '#a5b4fc',
+                                  background: 'rgba(99, 102, 241, 0.1)',
+                                  border: '1px solid rgba(99, 102, 241, 0.2)',
+                                  padding: '0.1rem 0.45rem',
+                                  borderRadius: 9999,
+                                }}
+                              >
+                                {subQuery}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                     </div>
                   </div>
 
@@ -868,6 +994,17 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
               </div>
             );
           })
+        ) : response && response.results.length > 0 && selectedSubQueries.length > 0 ? (
+          <div className="glass-card empty-state">
+            <Filter className="empty-icon" />
+            <p className="empty-title">No Chunks Match Selected Sub-queries</p>
+            <p className="empty-desc">
+              {response.results.length} chunk{response.results.length === 1 ? '' : 's'} were
+              retrieved, but none were matched by the selected sub-quer
+              {selectedSubQueries.length === 1 ? 'y' : 'ies'}. Clear the filter above to see all
+              results.
+            </p>
+          </div>
         ) : response && response.results.length === 0 ? (
           <div className="glass-card empty-state">
             <AlertCircle className="empty-icon" />

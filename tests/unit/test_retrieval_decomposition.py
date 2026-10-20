@@ -381,6 +381,22 @@ async def test_decomposed_retrieval_merges_candidates_and_reranks_globally() -> 
     )
     assert shared_candidate.distance == 0.1
 
+    # Sub-query attribution: a chunk retrieved by only one sub-query reports
+    # only that one, regardless of which occurrence's distance won.
+    first_candidate = next(
+        chunk for chunk in rerank_candidates if chunk.chunk_id == first.chunk_id
+    )
+    third_candidate = next(
+        chunk for chunk in rerank_candidates if chunk.chunk_id == third.chunk_id
+    )
+    assert first_candidate.matched_sub_queries == ("query one",)
+    assert third_candidate.matched_sub_queries == ("query two",)
+
+    # `shared` was retrieved by BOTH sub-queries -- its kept (lowest-
+    # distance) occurrence came from "query two", but attribution must still
+    # report both, not just the one tied to the winning distance.
+    assert set(shared_candidate.matched_sub_queries) == {"query one", "query two"}
+
     # The single global reranker determines the final Top K.
     assert len(results) == 2
     assert results == list(reversed(rerank_candidates))[:2]

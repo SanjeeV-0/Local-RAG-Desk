@@ -24,6 +24,7 @@ const TRACE: TraceData = {
       content: 'Candidate content',
       distance: 0.2,
       rerank_score: null,
+      matched_sub_queries: ['q'],
     },
   ],
   final_results: [],

@@ -26,6 +26,7 @@ class RetrievalTraceCandidate:
     content: str
     distance: float
     rerank_score: float | None = None
+    matched_sub_queries: list[str] = field(default_factory=list)
 
 
 @dataclass

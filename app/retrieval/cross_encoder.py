@@ -32,8 +32,9 @@ class CrossEncoderReranker:
         cutoff or batch-size limit here; truncation to the caller's final
         `limit` happens after this returns (see
         `RetrievalService._search`). `distance` (cosine distance from the
-        original vector search) is preserved unchanged; only `rerank_score`
-        is newly populated on the returned chunks.
+        original vector search) and `matched_sub_queries` are preserved
+        unchanged; only `rerank_score` is newly populated on the returned
+        chunks.
         """
 
         if not chunks:
@@ -59,6 +60,7 @@ class CrossEncoderReranker:
                 content=chunk.content,
                 distance=chunk.distance,
                 rerank_score=float(score),
+                matched_sub_queries=chunk.matched_sub_queries,
             )
             for chunk, score in ranked
         ]

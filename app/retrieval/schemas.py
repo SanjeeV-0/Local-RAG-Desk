@@ -76,6 +76,11 @@ class RetrievedChunkResponse(BaseModel):
     distance: float
     similarity: float
     rerank_score: float | None
+    # Every sub-query (including the original query, when kept as one of
+    # them) whose vector search returned this chunk. A single-entry
+    # `decomposition.sub_queries` means there is nothing meaningful to
+    # attribute -- every chunk's list is just that one entry.
+    matched_sub_queries: list[str]
 
 
 class RetrievalTraceCandidateResponse(BaseModel):
@@ -93,6 +98,7 @@ class RetrievalTraceCandidateResponse(BaseModel):
     content: str
     distance: float
     rerank_score: float | None
+    matched_sub_queries: list[str]
 
 
 class RetrievalTraceContextResponse(BaseModel):

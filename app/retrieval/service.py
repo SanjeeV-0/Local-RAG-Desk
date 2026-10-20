@@ -31,6 +31,7 @@ produced from the reranked candidate pool:
 """
 
 import asyncio
+import dataclasses
 from typing import Literal
 from uuid import UUID
 
@@ -354,12 +355,29 @@ class RetrievalService:
             for candidate in candidates:
                 existing = merged_candidates.get(candidate.chunk_id)
 
+                # Accumulate every sub-query whose search surfaced this
+                # chunk -- NOT just the one tied to whichever occurrence
+                # ends up kept below. A chunk retrieved by two sub-queries
+                # should report both, even though only its best-distance
+                # occurrence determines ranking.
+                matched_sub_queries = (
+                    existing.matched_sub_queries if existing is not None else ()
+                )
+                if retrieval_query not in matched_sub_queries:
+                    matched_sub_queries = (*matched_sub_queries, retrieval_query)
+
                 # Merge by chunk_id across sub-queries, keeping each chunk's
                 # best (lowest-distance) occurrence rather than the first one
                 # seen -- a chunk surfaced by two sub-queries should be
                 # ranked by its strongest match, not an arbitrary one.
                 if existing is None or candidate.distance < existing.distance:
-                    merged_candidates[candidate.chunk_id] = candidate
+                    merged_candidates[candidate.chunk_id] = dataclasses.replace(
+                        candidate, matched_sub_queries=matched_sub_queries
+                    )
+                else:
+                    merged_candidates[candidate.chunk_id] = dataclasses.replace(
+                        existing, matched_sub_queries=matched_sub_queries
+                    )
 
         candidates = sorted(
             merged_candidates.values(),
@@ -456,4 +474,5 @@ class RetrievalService:
             content=redact(chunk.content).text,
             distance=chunk.distance,
             rerank_score=chunk.rerank_score,
+            matched_sub_queries=list(chunk.matched_sub_queries),
         )

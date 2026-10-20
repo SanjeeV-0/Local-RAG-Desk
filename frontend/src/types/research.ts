@@ -34,6 +34,7 @@ export interface CandidateResult {
   content: string;
   distance: number;
   rerank_score: number | null;
+  matched_sub_queries: string[];
 }
 
 export interface TraceContextSource {
@@ -45,6 +46,7 @@ export interface TraceContextSource {
   content: string;
   distance: number;
   rerank_score: number | null;
+  matched_sub_queries: string[];
 }
 
 export interface TraceContext {
@@ -224,6 +226,11 @@ export interface RetrievedChunkResponse {
   distance: number;
   similarity: number;
   rerank_score: number | null;
+  // Every sub-query (from `decomposition.sub_queries`, including the
+  // original query when kept as one of them) whose vector search returned
+  // this chunk. A single-entry `decomposition.sub_queries` means every
+  // chunk's list is just that one entry -- nothing meaningful to filter by.
+  matched_sub_queries: string[];
 }
 
 export interface RetrievalSearchResponse {

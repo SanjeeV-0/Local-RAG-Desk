@@ -1,3 +1,4 @@
+import dataclasses
 from uuid import uuid4
 
 import pytest
@@ -101,7 +102,14 @@ async def test_retrieval_service_reranks_candidates() -> None:
 
     assert repository.received_limit == 3
     assert reranker.received_query == "research query"
-    assert reranker.received_chunks == chunks
+    # Every candidate is tagged with the sub-query that retrieved it -- even
+    # here, with no decomposer configured, `retrieval_queries` is still
+    # `("research query",)`, so each merged candidate carries that one
+    # entry (see `RetrievalService._search`'s merge loop).
+    assert reranker.received_chunks == [
+        dataclasses.replace(chunk, matched_sub_queries=("research query",))
+        for chunk in chunks
+    ]
 
     assert [result.content for result in results] == [
         "chunk 3",

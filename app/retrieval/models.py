@@ -19,6 +19,14 @@ class RetrievedChunk:
     content: str
     distance: float
     rerank_score: float | None = None
+    # Every sub-query (in `RetrievalService._search`'s `retrieval_queries`,
+    # which includes the original query whenever it was kept as one of
+    # them) whose per-sub-query vector search returned this chunk -- set
+    # during candidate merging, NOT just the one sub-query tied to its kept
+    # (lowest-distance) occurrence. Empty for a chunk built anywhere other
+    # than `RetrievalService._search` (e.g. directly from the repository,
+    # or in tests that construct a `RetrievedChunk` without this field).
+    matched_sub_queries: tuple[str, ...] = ()
 
     @property
     def similarity(self) -> float:

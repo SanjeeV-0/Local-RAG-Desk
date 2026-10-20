@@ -49,6 +49,7 @@ def _trace_candidate_response(
         content=candidate.content,
         distance=candidate.distance,
         rerank_score=candidate.rerank_score,
+        matched_sub_queries=candidate.matched_sub_queries,
     )
 
 
@@ -147,6 +148,7 @@ async def search(
                 distance=result.distance,
                 similarity=result.similarity,
                 rerank_score=result.rerank_score,
+                matched_sub_queries=list(result.matched_sub_queries),
             )
         )
 
