@@ -1,5 +1,5 @@
 {
-  "name": "production-ai-research-agent-ui",
+  "name": "local-rag-desk-ui",
   "private": true,
   "version": "0.1.0",
   "type": "module",

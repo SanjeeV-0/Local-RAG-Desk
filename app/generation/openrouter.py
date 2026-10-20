@@ -46,7 +46,7 @@ class OpenRouterGenerationProvider:
         response_format: dict[str, object] | None,
         reasoning_effort: str | None,
         base_url: str = "https://openrouter.ai/api/v1",
-        app_name: str = "Production AI Research & Knowledge Agent",
+        app_name: str = "Local RAG Desk",
         top_k: int | None = None,
         frequency_penalty: float | None = None,
         presence_penalty: float | None = None,

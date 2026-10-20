@@ -54,6 +54,7 @@ class IngestionService:
         session: AsyncSession,
         embedding_provider: EmbeddingProvider,
         file_storage: FileStorage,
+        semantic_similarity_threshold: float = 0.7,
     ) -> None:
         self.session = session
         self.file_storage = file_storage
@@ -69,6 +70,12 @@ class IngestionService:
             embedding_provider=embedding_provider,
         )
         self.embedding_provider = embedding_provider
+        # Defaults to the exact value this class previously hard-coded
+        # inline, so every existing call site (including unit tests) that
+        # doesn't pass this argument preserves today's exact behavior.
+        # Settings-backed via `Settings.semantic_similarity_threshold` in
+        # production (see `app.core.dependencies.get_ingestion_service`).
+        self.semantic_similarity_threshold = semantic_similarity_threshold
 
     async def ingest_file(
         self,
@@ -269,9 +276,11 @@ class IngestionService:
 
                 page_ids[page.page_number] = document_page.id
 
-            # 0.7 similarity threshold is hard-coded here, not a Settings
-            # field -- it controls how aggressively adjacent paragraphs are
-            # grouped into one chunk before splitting.
+            # Similarity threshold controls how aggressively adjacent
+            # paragraphs are grouped into one chunk before splitting; see
+            # `Settings.semantic_similarity_threshold` for what changing it
+            # does. Defaults to the exact value (0.7) this class previously
+            # hard-coded inline.
             #
             # The final per-chunk size cap (for both prose and table
             # chunks, which share this one budget) is tokenizer-aware when
@@ -325,7 +334,7 @@ class IngestionService:
             semantic_units = shred_semantically(
                 structural_units,
                 embedding_provider=self.embedding_provider,
-                threshold=0.7,
+                threshold=self.semantic_similarity_threshold,
             )
 
             child_chunks = apply_size_guard(

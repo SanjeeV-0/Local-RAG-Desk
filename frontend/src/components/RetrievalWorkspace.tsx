@@ -357,10 +357,6 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
                     disabled={isLoading}
                   />
                 </div>
-                <div style={{ fontSize: '0.7rem', color: '#64748b', marginTop: '0.3rem' }}>
-                  The number of reranked results returned -- not the number of candidates
-                  evaluated before reranking (see "Candidate Limit per Subquery" below).
-                </div>
               </div>
 
               <div>
@@ -386,13 +382,6 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
                   }}
                   disabled={isLoading}
                 />
-                <div style={{ fontSize: '0.7rem', color: '#64748b', marginTop: '0.3rem' }}>
-                  Candidates are fetched per subquery, then merged and deduplicated -- the
-                  combined pool can exceed this number when the query is decomposed into
-                  more than one subquery. Leave blank to use the server's configured
-                  default (shown in the trace summary below as "Candidate Limit" once a
-                  request completes with Trace Mode on).
-                </div>
               </div>
 
               <div>
@@ -473,10 +462,6 @@ export const RetrievalWorkspace: React.FC<RetrievalWorkspaceProps> = ({
                   }}
                   disabled={isLoading}
                 />
-                <div style={{ fontSize: '0.7rem', color: '#64748b', marginTop: '0.3rem' }}>
-                  No section browser is available yet -- paste a section UUID directly
-                  (e.g. copied from a result's "Details" drawer below).
-                </div>
               </div>
             </div>
           )}

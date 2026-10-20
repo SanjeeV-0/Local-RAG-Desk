@@ -1,5 +1,5 @@
 import React, { useState, KeyboardEvent } from 'react';
-import { Search, Sparkles, Send, X } from 'lucide-react';
+import { Search, Send, X } from 'lucide-react';
 
 interface ResearchInputProps {
   onSearch: (query: string) => void;
@@ -9,12 +9,6 @@ interface ResearchInputProps {
   // see ResearchPage's use of useCancellableRequest.
   onCancel?: () => void;
 }
-
-const SAMPLE_QUERIES = [
-  "What does this document say about RAG?",
-  "Explain vector retrieval and reranking process",
-  "What parameters are used for embeddings?",
-];
 
 export const ResearchInput: React.FC<ResearchInputProps> = ({
   onSearch,
@@ -35,11 +29,6 @@ export const ResearchInput: React.FC<ResearchInputProps> = ({
       e.preventDefault();
       handleSubmit();
     }
-  };
-
-  const handleSampleClick = (sample: string) => {
-    setQuery(sample);
-    onSearch(sample);
   };
 
   return (
@@ -69,24 +58,7 @@ export const ResearchInput: React.FC<ResearchInputProps> = ({
         </div>
 
         <div className="input-actions-row">
-          <div className="sample-prompts">
-            <span style={{ fontSize: '0.75rem', color: '#64748b', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
-              <Sparkles size={12} /> Try asking:
-            </span>
-            {SAMPLE_QUERIES.map((sample, idx) => (
-              <button
-                key={idx}
-                type="button"
-                className="sample-prompt-btn"
-                onClick={() => handleSampleClick(sample)}
-                disabled={isLoading}
-              >
-                {sample}
-              </button>
-            ))}
-          </div>
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginLeft: 'auto' }}>
             {isLoading && onCancel && (
               <button
                 type="button"

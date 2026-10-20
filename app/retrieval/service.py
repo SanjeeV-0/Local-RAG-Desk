@@ -30,6 +30,7 @@ produced from the reranked candidate pool:
     output as one of its two input rankings.
 """
 
+import asyncio
 from typing import Literal
 from uuid import UUID
 
@@ -327,7 +328,16 @@ class RetrievalService:
         merged_candidates = {}
 
         for retrieval_query in retrieval_queries:
-            query_embedding = self.embedding_provider.embed_text(retrieval_query)
+            # Run off the event loop: `embed_text` is a synchronous,
+            # CPU-bound sentence-transformers call -- calling it directly
+            # here would block every other in-flight request (including
+            # unrelated health checks) for the duration of inference.
+            # `asyncio.to_thread` preserves the exact return value and
+            # exception behavior, just off the main thread.
+            query_embedding = await asyncio.to_thread(
+                self.embedding_provider.embed_text,
+                retrieval_query,
+            )
 
             # candidate_limit applies PER sub-query, not split across them --
             # N sub-queries can yield up to N * candidate_limit raw results
@@ -373,7 +383,11 @@ class RetrievalService:
             # this is what makes cross-sub-query ranking comparable. Reranking
             # per sub-query would score each pool against a different query
             # and produce incomparable scores.
-            reranked = self.reranker.rerank(
+            # Same rationale as the embed_text call above: CrossEncoder.predict
+            # is a synchronous, CPU-bound call over the whole candidate pool
+            # and must not block the event loop.
+            reranked = await asyncio.to_thread(
+                self.reranker.rerank,
                 query,
                 candidates,
             )

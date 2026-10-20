@@ -1,7 +1,7 @@
 [project]
-name = "production-ai-research-agent"
+name = "local-rag-desk"
 version = "0.1.0"
-description = "Production-grade AI research and engineering knowledge agent"
+description = "Local RAG Desk -- a single-user RAG research and engineering knowledge desk"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 authors = [

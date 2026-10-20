@@ -1,4 +1,4 @@
-# Production AI Research & Knowledge Agent
+# Local RAG Desk
 
 A production-oriented AI research and engineering knowledge agent for a curated corpus of AI, LLM, RAG, and Agentic AI technical documents.
 

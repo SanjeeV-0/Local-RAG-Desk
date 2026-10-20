@@ -44,7 +44,7 @@ export const Header: React.FC<HeaderProps> = ({
             <Cpu size={22} />
           </div>
           <div>
-            <h1 className="brand-title">Production AI Research Agent</h1>
+            <h1 className="brand-title">Local RAG Desk</h1>
             <p className="brand-subtitle">
               PostgreSQL + pgvector &middot; OpenRouter LLM &middot; Lifecycle & Evidence Workspace
             </p>

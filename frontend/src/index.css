@@ -343,29 +343,6 @@ button {
   margin-top: 1rem;
 }
 
-.sample-prompts {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-}
-
-.sample-prompt-btn {
-  font-size: 0.78rem;
-  padding: 0.35rem 0.7rem;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--border-subtle);
-  border-radius: 9999px;
-  color: var(--text-secondary);
-  transition: all 0.2s ease;
-}
-
-.sample-prompt-btn:hover {
-  background: rgba(99, 102, 241, 0.15);
-  border-color: rgba(99, 102, 241, 0.3);
-  color: var(--text-highlight);
-}
-
 .btn-primary {
   display: inline-flex;
   align-items: center;

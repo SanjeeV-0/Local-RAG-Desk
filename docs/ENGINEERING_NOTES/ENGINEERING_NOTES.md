@@ -1,6 +1,6 @@
 I suggest we create a living project engineering document that we update at major milestones.
 
-Production AI Research Agent — Engineering Notes
+Local RAG Desk — Engineering Notes
 1. Project Goal
 
 We are building a production-grade AI research and engineering knowledge agent over a controlled corpus of AI/LLM/RAG/Agentic-AI technical documents.

@@ -1,4 +1,4 @@
-# Production AI Research & Knowledge Agent — Project Documentation
+# Local RAG Desk — Project Documentation
 
 > **Scope of this document.** This is a from-the-code audit of the repository as it exists
 > today. It describes what is actually implemented, not the aspirational roadmap in the
@@ -15,7 +15,7 @@
 
 ## 1. Project Overview
 
-The **Production AI Research & Knowledge Agent** is a backend (FastAPI) + frontend (React/
+The **Local RAG Desk** is a backend (FastAPI) + frontend (React/
 Vite) application that lets a user:
 
 1. **Ingest documents** (Markdown, PDF, `.docx`) into a managed corpus, with versioning,
@@ -1250,7 +1250,7 @@ reads from `.env` via `pydantic-settings`, case-insensitive, `extra="ignore"`)
 
 | Env var | Python field | Type | Default | Group | Effect |
 |---|---|---|---|---|---|
-| `APP_NAME` | `app_name` | `str` | `"Production AI Research & Knowledge Agent"` | Application | FastAPI title; also the default OpenRouter `X-Title` if `OPENROUTER_APP_NAME` isn't set separately |
+| `APP_NAME` | `app_name` | `str` | `"Local RAG Desk"` | Application | FastAPI title; also the default OpenRouter `X-Title` if `OPENROUTER_APP_NAME` isn't set separately |
 | `APP_VERSION` | `app_version` | `str` | `"0.1.0"` | Application | FastAPI `version` |
 | `ENVIRONMENT` | `environment` | `str` | `"development"` | Application | Reported by `GET /health`; not otherwise branched on in the inspected code |
 | `LOG_LEVEL` | `log_level` | `str` | `"INFO"` | Application | `logging.basicConfig` level (`app/core/logging.py`) |
@@ -1266,7 +1266,7 @@ reads from `.env` via `pydantic-settings`, case-insensitive, `extra="ignore"`)
 | `LANGFUSE_ENVIRONMENT` | `langfuse_environment` | `str` | `"development"` | Observability | Tag reported to Langfuse |
 | `OPENROUTER_API_KEY` | `openrouter_api_key` | `str \| None` | `None` | OpenRouter/LLM | Required (raises if missing) by **both** the decomposition provider and the generation provider — see §11 |
 | `OPENROUTER_BASE_URL` | `openrouter_base_url` | `str` | `"https://openrouter.ai/api/v1"` | OpenRouter/LLM | Base URL for both OpenRouter clients |
-| `OPENROUTER_APP_NAME` | `openrouter_app_name` | `str` | `"Production AI Research & Knowledge Agent"` | OpenRouter/LLM | Sent as the `X-Title` header on both OpenRouter clients |
+| `OPENROUTER_APP_NAME` | `openrouter_app_name` | `str` | `"Local RAG Desk"` | OpenRouter/LLM | Sent as the `X-Title` header on both OpenRouter clients |
 | `OPENROUTER_TIMEOUT_SECONDS` | `openrouter_timeout_seconds` | `float \| None` | `None` | OpenRouter/LLM (shared) | **Shared** by both providers' `AsyncOpenAI` client construction. `None` = don't override the `openai` SDK's own default timeout (distinct from passing `timeout=None` explicitly). Must be > 0 when set. |
 | `OPENROUTER_MAX_RETRIES` | `openrouter_max_retries` | `int` | `2` | OpenRouter/LLM (shared) | **Shared** by both providers. Matches the `openai` SDK's own current default exactly — the SDK already retries retryable errors internally; this project adds no custom retry loop. Must be ≥ 0. |
 

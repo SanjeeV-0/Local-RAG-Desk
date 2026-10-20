@@ -227,10 +227,13 @@ async def get_ingestion_service(
 ) -> IngestionService:
     """Create an ingestion service for the current database session."""
 
+    settings = get_settings()
+
     return IngestionService(
         session=session,
         embedding_provider=embedding_provider,
         file_storage=file_storage,
+        semantic_similarity_threshold=settings.semantic_similarity_threshold,
     )
 
 

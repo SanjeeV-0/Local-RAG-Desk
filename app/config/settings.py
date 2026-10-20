@@ -58,7 +58,7 @@ _logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
-    app_name: str = "Production AI Research & Knowledge Agent"
+    app_name: str = "Local RAG Desk"
     app_version: str = "0.1.0"
     environment: str = "development"
     log_level: str = "INFO"
@@ -73,6 +73,25 @@ class Settings(BaseSettings):
     # different models are not comparable.
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    # Adjacent-paragraph cosine-similarity boundary used by
+    # `shred_semantically` (app.ingestion.semantic_shredder) to decide
+    # whether two consecutive prose units belong in the same chunk. Default
+    # (0.7) is the exact value this project previously hard-coded in
+    # `IngestionService._process_document` -- leaving this unset changes
+    # nothing. Lower it to merge more adjacent paragraphs into fewer, larger
+    # chunks (more surrounding context per chunk, coarser boundaries);
+    # raise it to split more aggressively (smaller, more topically-precise
+    # chunks). Only affects ingestion of documents processed AFTER the
+    # change -- it is not retroactive against already-ingested chunks.
+    semantic_similarity_threshold: float = 0.7
+
+    @field_validator("semantic_similarity_threshold")
+    @classmethod
+    def _validate_semantic_similarity_threshold(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("semantic_similarity_threshold must be between 0.0 and 1.0.")
+
+        return value
     # pgvector HNSW query-time search breadth (`hnsw.ef_search`). `None`
     # (the default) means "don't touch it" -- vector search runs with
     # whatever `hnsw.ef_search` the Postgres server itself defaults to
@@ -170,7 +189,7 @@ class Settings(BaseSettings):
     openrouter_api_key: str | None = None
 
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    openrouter_app_name: str = "Production AI Research & Knowledge Agent"
+    openrouter_app_name: str = "Local RAG Desk"
 
     # Legacy, single-model configuration name from before generation and
     # decomposition had independent model settings. Deliberately NOT read
