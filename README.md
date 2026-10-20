@@ -268,10 +268,6 @@ When proposing changes:
 - Avoid committing secrets, personal data, or private documents.
 - Report evaluation results honestly, including known limitations.
 
-## License
 
-Add the license that applies to this repository before publishing or distributing the project.
-
----
 
 **Local RAG Desk** — explore your documents, retrieve relevant evidence, and build a more useful local research workflow.
