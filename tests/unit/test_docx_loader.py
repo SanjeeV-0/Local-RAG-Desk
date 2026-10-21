@@ -71,10 +71,14 @@ def test_docx_loader_returns_empty_content_for_document_with_no_text(tmp_path: P
     assert pages[0].content == ""
 
 
-def test_docx_loader_includes_table_text_after_paragraphs(tmp_path: Path) -> None:
-    """Tables are supported via the simple, documented ordering: all
-    paragraph text first, then each table rendered as a real Markdown pipe
-    table -- not interleaved at the table's true position in the document.
+def test_docx_loader_includes_table_text_in_document_order(tmp_path: Path) -> None:
+    """A table immediately following a paragraph (nothing else in the
+    document) stays immediately after it -- the simplest case of true
+    document-order preservation; see
+    `test_docx_loader_preserves_table_position_relative_to_headings` below
+    for the case this behavior actually matters for (multiple
+    headings-with-tables, where the old "all paragraphs, then all tables"
+    ordering silently misattributed every table to the last heading).
 
     The table is rendered as genuine pipe-table syntax (header row + a
     `|---|---|` separator), with the table's first row treated as its
@@ -177,6 +181,93 @@ def test_docx_loader_preserves_normal_paragraphs_with_native_headings(
     pages = loader.load(docx_path)
 
     assert pages[0].content == ("# Introduction\nThis remains a normal paragraph.\n## Details")
+
+
+def test_docx_loader_preserves_table_position_relative_to_headings(tmp_path: Path) -> None:
+    """A table between two headings must stay between them in the emitted
+    content, not get pushed after both into an "all tables last" block --
+    this is the actual condition that previously caused every table in a
+    multi-heading document to be misattributed to the LAST heading (see
+    `test_docx_table_inherits_section_from_its_true_position` below, which
+    verifies the resulting `section_path` is correct, not just this raw
+    ordering)."""
+
+    docx_path = tmp_path / "interleaved.docx"
+
+    document = DocxDocument()
+    document.add_heading("Results", level=2)
+    document.add_paragraph("Results summary.")
+
+    results_table = document.add_table(rows=1, cols=2)
+    results_table.cell(0, 0).text = "ResultsHeaderA"
+    results_table.cell(0, 1).text = "ResultsHeaderB"
+
+    document.add_heading("Conclusion", level=2)
+    document.add_paragraph("Conclusion summary.")
+
+    conclusion_table = document.add_table(rows=1, cols=2)
+    conclusion_table.cell(0, 0).text = "ConclusionHeaderA"
+    conclusion_table.cell(0, 1).text = "ConclusionHeaderB"
+
+    document.save(docx_path)
+
+    loader = DocxLoader()
+    pages = loader.load(docx_path)
+    content = pages[0].content
+
+    # The Results table must appear BEFORE the "Conclusion" heading, and the
+    # Conclusion table must appear AFTER it -- true document order, not
+    # "every table after every paragraph".
+    results_table_pos = content.index("ResultsHeaderA")
+    conclusion_heading_pos = content.index("## Conclusion")
+    conclusion_table_pos = content.index("ConclusionHeaderA")
+
+    assert results_table_pos < conclusion_heading_pos < conclusion_table_pos
+
+
+def test_docx_table_inherits_section_from_its_true_position(tmp_path: Path) -> None:
+    """End-to-end regression test for the actual bug: each table's
+    `section_path`, as assigned by `StructureExtractor`, must match the
+    heading it truly sits under -- not whichever heading happens to be last
+    in the document. Before the fix, both tables below would have been
+    attributed to "Conclusion", since `DocxLoader` rendered all tables after
+    all paragraph text regardless of their real position."""
+
+    docx_path = tmp_path / "interleaved.docx"
+
+    document = DocxDocument()
+    document.add_heading("Results", level=2)
+    document.add_paragraph("Results summary.")
+
+    results_table = document.add_table(rows=1, cols=2)
+    results_table.cell(0, 0).text = "ResultsHeaderA"
+    results_table.cell(0, 1).text = "ResultsHeaderB"
+
+    document.add_heading("Conclusion", level=2)
+    document.add_paragraph("Conclusion summary.")
+
+    conclusion_table = document.add_table(rows=1, cols=2)
+    conclusion_table.cell(0, 0).text = "ConclusionHeaderA"
+    conclusion_table.cell(0, 1).text = "ConclusionHeaderB"
+
+    document.save(docx_path)
+
+    pages = DocxLoader().load(docx_path)
+    units = StructureExtractor().extract(pages)
+
+    table_units = [unit for unit in units if unit.unit_type == UnitType.TABLE]
+
+    assert len(table_units) == 2
+
+    results_unit = next(
+        unit for unit in table_units if "ResultsHeaderA" in unit.content
+    )
+    conclusion_unit = next(
+        unit for unit in table_units if "ConclusionHeaderA" in unit.content
+    )
+
+    assert results_unit.section_path == "Results"
+    assert conclusion_unit.section_path == "Conclusion"
 
 
 def test_docx_fixture_preserves_native_heading_structure() -> None:
