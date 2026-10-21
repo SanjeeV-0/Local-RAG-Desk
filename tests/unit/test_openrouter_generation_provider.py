@@ -570,10 +570,11 @@ async def test_instruction_is_read_fresh_on_every_call_not_cached() -> None:
 
 
 @pytest.mark.asyncio
-async def test_default_instruction_alone_is_prepended_ahead_of_the_default_prompt() -> None:
-    """Configuring only the DEFAULT layer (no user instruction) must behave
-    the same way a lone user instruction already does -- prepended ahead of
-    the built-in prompt."""
+async def test_default_instruction_alone_is_wrapped_in_non_negotiable_policy_framing() -> None:
+    """Configuring only the DEFAULT layer (no user instruction) must wrap it
+    in explicit instruction-hierarchy framing -- declaring it non-negotiable
+    operator policy that outranks the question/retrieved content -- not
+    just prepend the raw text unframed. See `_build_system_prompt`."""
 
     provider = OpenRouterGenerationProvider(
         api_key="test-key",
@@ -594,8 +595,17 @@ async def test_default_instruction_alone_is_prepended_ahead_of_the_default_promp
     await provider.generate(query="What is RAG?", context=context)
 
     system_message = _system_message(provider)
-    assert system_message.startswith("Always cite page numbers when available.")
+    assert system_message.startswith("=== OPERATOR POLICY (non-negotiable) ===")
+    assert "Always cite page numbers when available." in system_message
     assert "You are a research assistant." in system_message
+    # The framing text itself must precede the raw instruction, and the raw
+    # instruction must precede the built-in prompt.
+    assert system_message.index("OPERATOR POLICY") < system_message.index(
+        "Always cite page numbers when available."
+    )
+    assert system_message.index(
+        "Always cite page numbers when available."
+    ) < system_message.index("You are a research assistant.")
 
 
 @pytest.mark.asyncio
@@ -632,6 +642,44 @@ async def test_default_and_user_instructions_combine_as_default_then_user_then_b
     builtin_pos = system_message.index("You are a research assistant.")
 
     assert default_pos < user_pos < builtin_pos
+
+    # The user instruction must be explicitly subordinated to the default,
+    # not just positioned after it -- otherwise the model has no actual
+    # signal that one outranks the other.
+    assert "=== SESSION PREFERENCE ===" in system_message
+    assert "does not conflict with the operator policy above" in system_message
+    session_preference_pos = system_message.index("=== SESSION PREFERENCE ===")
+    assert default_pos < session_preference_pos < user_pos
+
+
+@pytest.mark.asyncio
+async def test_user_instruction_alone_is_never_wrapped_in_hierarchy_framing() -> None:
+    """With no DEFAULT configured, there is no policy for the user
+    instruction to be subordinated to -- it must stay exactly as before
+    this feature existed: plain, unframed. This guards against the framing
+    logic accidentally firing when there is nothing to establish a
+    hierarchy against."""
+
+    provider = OpenRouterGenerationProvider(
+        api_key="test-key",
+        model="test-model",
+        temperature=0.2,
+        max_tokens=None,
+        top_p=1.0,
+        response_format=None,
+        reasoning_effort=None,
+        system_instruction_provider=FakeSystemInstructionProvider("Keep this answer short."),
+    )
+    provider.client.chat.completions.create = AsyncMock()
+    provider.client.chat.completions.create.return_value = make_response("An answer.")
+
+    context = ContextAssembler().assemble([])
+    await provider.generate(query="What is RAG?", context=context)
+
+    system_message = _system_message(provider)
+    assert system_message.startswith("Keep this answer short.")
+    assert "OPERATOR POLICY" not in system_message
+    assert "SESSION PREFERENCE" not in system_message
 
 
 @pytest.mark.asyncio
