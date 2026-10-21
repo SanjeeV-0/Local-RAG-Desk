@@ -30,6 +30,7 @@ from app.embeddings.sentence_transformer import (
 )
 from app.generation.generation_service import GenerationService
 from app.generation.openrouter import OpenRouterGenerationProvider
+from app.generation.system_instruction import FileSystemInstructionStore
 from app.ingestion.service import IngestionService
 from app.retrieval.cross_encoder import CrossEncoderReranker
 from app.retrieval.openrouter_decomposition import (
@@ -163,6 +164,40 @@ async def get_retrieval_service(
 
 
 @lru_cache
+def get_system_instruction_store() -> FileSystemInstructionStore:
+    """Return the application's USER system-instruction store -- the ad hoc
+    layer a user adds and clears as needed (see
+    `get_default_system_instruction_store` for the other, always-applied
+    layer; `OpenRouterGenerationProvider.generate` combines both).
+
+    Cached as a process-lifetime singleton like the other dependencies
+    here -- cheap to construct (it just holds a path) -- but this is NOT a
+    cache of the instruction's CONTENT: `.get()`/`.set()` always read/write
+    the file fresh, so an edit via `PUT /settings/system-instruction` is
+    visible to the very next `/research/ask` call with no restart needed.
+    """
+
+    settings = get_settings()
+
+    return FileSystemInstructionStore(Path(settings.storage_root) / "system_instruction.txt")
+
+
+@lru_cache
+def get_default_system_instruction_store() -> FileSystemInstructionStore:
+    """Return the application's DEFAULT system-instruction store -- the
+    always-applied baseline layer (e.g. a house style, "always cite page
+    numbers"), meant to be configured once and rarely changed, as opposed
+    to the ad hoc `get_system_instruction_store` layer. Same singleton/
+    always-read-fresh contract as that store; see its docstring."""
+
+    settings = get_settings()
+
+    return FileSystemInstructionStore(
+        Path(settings.storage_root) / "default_system_instruction.txt"
+    )
+
+
+@lru_cache
 def get_generation_provider() -> OpenRouterGenerationProvider:
     """Return the configured OpenRouter generation provider."""
 
@@ -186,6 +221,8 @@ def get_generation_provider() -> OpenRouterGenerationProvider:
         presence_penalty=settings.openrouter_generation_presence_penalty,
         timeout=settings.openrouter_timeout_seconds,
         max_retries=settings.openrouter_max_retries,
+        system_instruction_provider=get_system_instruction_store(),
+        default_system_instruction_provider=get_default_system_instruction_store(),
     )
 
 

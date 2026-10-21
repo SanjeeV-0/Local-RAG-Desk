@@ -432,3 +432,246 @@ def test_default_max_retries_matches_sdk_default() -> None:
     )
 
     assert provider.client.max_retries == 2
+
+
+class FakeSystemInstructionProvider:
+    """Mutable fake -- lets a test change what the NEXT `.get()` call
+    returns, to prove `generate` re-reads it every call rather than caching
+    whatever was configured at construction time."""
+
+    def __init__(self, text: str = "") -> None:
+        self.text = text
+
+    def get(self) -> str:
+        return self.text
+
+
+def _system_message(provider: OpenRouterGenerationProvider) -> str:
+    call = provider.client.chat.completions.create.await_args
+    messages = call.kwargs["messages"]
+    system_message = next(m for m in messages if m["role"] == "system")
+    return system_message["content"]
+
+
+@pytest.mark.asyncio
+async def test_no_system_instruction_provider_leaves_prompt_unchanged() -> None:
+    """The default (`system_instruction_provider=None`, every existing call
+    site) must produce EXACTLY the same system prompt as before this
+    feature existed."""
+
+    provider = OpenRouterGenerationProvider(
+        api_key="test-key",
+        model="test-model",
+        temperature=0.2,
+        max_tokens=None,
+        top_p=1.0,
+        response_format=None,
+        reasoning_effort=None,
+    )
+    provider.client.chat.completions.create = AsyncMock()
+    provider.client.chat.completions.create.return_value = make_response("An answer.")
+
+    context = ContextAssembler().assemble([])
+    await provider.generate(query="What is RAG?", context=context)
+
+    system_message = _system_message(provider)
+    assert system_message.startswith("You are a research assistant.")
+
+
+@pytest.mark.asyncio
+async def test_configured_empty_instruction_leaves_prompt_unchanged() -> None:
+    """A configured provider that currently returns "" (no instruction set
+    yet, or cleared back to empty) must behave identically to having no
+    provider at all -- never prepend a stray blank line."""
+
+    provider = OpenRouterGenerationProvider(
+        api_key="test-key",
+        model="test-model",
+        temperature=0.2,
+        max_tokens=None,
+        top_p=1.0,
+        response_format=None,
+        reasoning_effort=None,
+        system_instruction_provider=FakeSystemInstructionProvider(""),
+    )
+    provider.client.chat.completions.create = AsyncMock()
+    provider.client.chat.completions.create.return_value = make_response("An answer.")
+
+    context = ContextAssembler().assemble([])
+    await provider.generate(query="What is RAG?", context=context)
+
+    system_message = _system_message(provider)
+    assert system_message.startswith("You are a research assistant.")
+
+
+@pytest.mark.asyncio
+async def test_configured_instruction_is_prepended_ahead_of_the_default_prompt() -> None:
+    """A real configured instruction must appear FIRST in the system
+    message, ahead of the built-in instructions -- and therefore, since the
+    retrieved-chunk context only ever lives in the user message, ahead of
+    that too."""
+
+    instruction_provider = FakeSystemInstructionProvider(
+        "Always answer in formal British English."
+    )
+    provider = OpenRouterGenerationProvider(
+        api_key="test-key",
+        model="test-model",
+        temperature=0.2,
+        max_tokens=None,
+        top_p=1.0,
+        response_format=None,
+        reasoning_effort=None,
+        system_instruction_provider=instruction_provider,
+    )
+    provider.client.chat.completions.create = AsyncMock()
+    provider.client.chat.completions.create.return_value = make_response("An answer.")
+
+    context = ContextAssembler().assemble([])
+    await provider.generate(query="What is RAG?", context=context)
+
+    system_message = _system_message(provider)
+    assert system_message.startswith("Always answer in formal British English.")
+    assert "You are a research assistant." in system_message
+    assert system_message.index(
+        "Always answer in formal British English."
+    ) < system_message.index("You are a research assistant.")
+
+
+@pytest.mark.asyncio
+async def test_instruction_is_read_fresh_on_every_call_not_cached() -> None:
+    """Changing the store's content between two calls on the SAME provider
+    instance must be reflected on the very next call -- proving the
+    instruction is never read once and frozen at construction time."""
+
+    instruction_provider = FakeSystemInstructionProvider("First instruction.")
+    provider = OpenRouterGenerationProvider(
+        api_key="test-key",
+        model="test-model",
+        temperature=0.2,
+        max_tokens=None,
+        top_p=1.0,
+        response_format=None,
+        reasoning_effort=None,
+        system_instruction_provider=instruction_provider,
+    )
+    provider.client.chat.completions.create = AsyncMock()
+    provider.client.chat.completions.create.return_value = make_response("An answer.")
+
+    context = ContextAssembler().assemble([])
+
+    await provider.generate(query="What is RAG?", context=context)
+    assert _system_message(provider).startswith("First instruction.")
+
+    instruction_provider.text = "Second instruction."
+
+    await provider.generate(query="What is RAG?", context=context)
+    assert _system_message(provider).startswith("Second instruction.")
+
+
+@pytest.mark.asyncio
+async def test_default_instruction_alone_is_prepended_ahead_of_the_default_prompt() -> None:
+    """Configuring only the DEFAULT layer (no user instruction) must behave
+    the same way a lone user instruction already does -- prepended ahead of
+    the built-in prompt."""
+
+    provider = OpenRouterGenerationProvider(
+        api_key="test-key",
+        model="test-model",
+        temperature=0.2,
+        max_tokens=None,
+        top_p=1.0,
+        response_format=None,
+        reasoning_effort=None,
+        default_system_instruction_provider=FakeSystemInstructionProvider(
+            "Always cite page numbers when available."
+        ),
+    )
+    provider.client.chat.completions.create = AsyncMock()
+    provider.client.chat.completions.create.return_value = make_response("An answer.")
+
+    context = ContextAssembler().assemble([])
+    await provider.generate(query="What is RAG?", context=context)
+
+    system_message = _system_message(provider)
+    assert system_message.startswith("Always cite page numbers when available.")
+    assert "You are a research assistant." in system_message
+
+
+@pytest.mark.asyncio
+async def test_default_and_user_instructions_combine_as_default_then_user_then_builtin() -> None:
+    """Both layers configured together must appear in the order
+    [default] + [user] + [built-in prompt] -- never reordered, never one
+    silently overriding the other."""
+
+    provider = OpenRouterGenerationProvider(
+        api_key="test-key",
+        model="test-model",
+        temperature=0.2,
+        max_tokens=None,
+        top_p=1.0,
+        response_format=None,
+        reasoning_effort=None,
+        default_system_instruction_provider=FakeSystemInstructionProvider(
+            "Always cite page numbers when available."
+        ),
+        system_instruction_provider=FakeSystemInstructionProvider(
+            "Keep this answer under 100 words."
+        ),
+    )
+    provider.client.chat.completions.create = AsyncMock()
+    provider.client.chat.completions.create.return_value = make_response("An answer.")
+
+    context = ContextAssembler().assemble([])
+    await provider.generate(query="What is RAG?", context=context)
+
+    system_message = _system_message(provider)
+
+    default_pos = system_message.index("Always cite page numbers when available.")
+    user_pos = system_message.index("Keep this answer under 100 words.")
+    builtin_pos = system_message.index("You are a research assistant.")
+
+    assert default_pos < user_pos < builtin_pos
+
+
+@pytest.mark.asyncio
+async def test_empty_default_instruction_does_not_leave_a_stray_blank_section() -> None:
+    """An unconfigured/empty DEFAULT layer alongside a real USER layer must
+    produce exactly the same prompt as the user-only case -- no leftover
+    blank line or empty section where the default would have gone."""
+
+    with_default_provider = OpenRouterGenerationProvider(
+        api_key="test-key",
+        model="test-model",
+        temperature=0.2,
+        max_tokens=None,
+        top_p=1.0,
+        response_format=None,
+        reasoning_effort=None,
+        default_system_instruction_provider=FakeSystemInstructionProvider(""),
+        system_instruction_provider=FakeSystemInstructionProvider("User instruction."),
+    )
+    with_default_provider.client.chat.completions.create = AsyncMock()
+    with_default_provider.client.chat.completions.create.return_value = make_response(
+        "An answer."
+    )
+
+    user_only_provider = OpenRouterGenerationProvider(
+        api_key="test-key",
+        model="test-model",
+        temperature=0.2,
+        max_tokens=None,
+        top_p=1.0,
+        response_format=None,
+        reasoning_effort=None,
+        system_instruction_provider=FakeSystemInstructionProvider("User instruction."),
+    )
+    user_only_provider.client.chat.completions.create = AsyncMock()
+    user_only_provider.client.chat.completions.create.return_value = make_response("An answer.")
+
+    context = ContextAssembler().assemble([])
+
+    await with_default_provider.generate(query="What is RAG?", context=context)
+    await user_only_provider.generate(query="What is RAG?", context=context)
+
+    assert _system_message(with_default_provider) == _system_message(user_only_provider)

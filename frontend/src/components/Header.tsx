@@ -1,6 +1,7 @@
-import React from 'react';
-import { Cpu, Terminal, Activity, Database, Sparkles, BookOpen, Layers, GitBranch } from 'lucide-react';
+import React, { useState } from 'react';
+import { Cpu, Terminal, Activity, Database, Sparkles, BookOpen, Layers, GitBranch, MessageSquareText } from 'lucide-react';
 import { BackendReadinessResponse } from '../types/research';
+import { SystemInstructionModal } from './SystemInstructionModal';
 
 export type WorkspaceTab = 'research' | 'retrieval' | 'documents' | 'trace';
 
@@ -34,8 +35,13 @@ export const Header: React.FC<HeaderProps> = ({
   hasTraceData,
 }) => {
   const isDbReady = readinessInfo?.status === 'ready' && readinessInfo.checks.database;
+  // Owned locally -- no other component needs to know whether this modal
+  // is open, unlike `traceEnabled`/`routerEnabled`, which affect every
+  // outgoing request and so are lifted up to ResearchPage.
+  const [isSystemInstructionModalOpen, setIsSystemInstructionModalOpen] = useState(false);
 
   return (
+    <>
     <header className="header" style={{ flexDirection: 'column', gap: '1rem', padding: '1.25rem 1.75rem' }}>
       {/* Top Brand & System Status Bar */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', flexWrap: 'wrap', gap: '1rem' }}>
@@ -79,6 +85,21 @@ export const Header: React.FC<HeaderProps> = ({
               ? 'pgvector Ready'
               : 'DB Disconnected'}
           </div>
+
+          {/* System Instruction -- opens a modal to edit the single,
+              global instruction prepended to the LLM's system prompt on
+              every research question, ahead of the retrieved-chunk
+              context. See SystemInstructionModal. */}
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => setIsSystemInstructionModalOpen(true)}
+            style={{ fontSize: '0.78rem' }}
+            title="Edit the system instruction sent to the LLM ahead of every research question"
+          >
+            <MessageSquareText size={14} />
+            System Instruction
+          </button>
 
           {/* Query Router toggle */}
           <div className="trace-toggle-box">
@@ -189,5 +210,10 @@ export const Header: React.FC<HeaderProps> = ({
         )}
       </nav>
     </header>
+    <SystemInstructionModal
+      isOpen={isSystemInstructionModalOpen}
+      onClose={() => setIsSystemInstructionModalOpen(false)}
+    />
+    </>
   );
 };

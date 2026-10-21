@@ -1,9 +1,9 @@
 """FastAPI application entry point.
 
-Builds the `FastAPI` app, registers the three routers (documents, retrieval,
-research), and exposes two liveness/readiness endpoints. Contains no
-business logic itself -- every route's actual behavior lives in `app/api/*`
-and the service/repository layers they call.
+Builds the `FastAPI` app, registers the four routers (documents, retrieval,
+research, settings), and exposes two liveness/readiness endpoints. Contains
+no business logic itself -- every route's actual behavior lives in
+`app/api/*` and the service/repository layers they call.
 """
 
 import logging
@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from app.api.documents import router as documents_router
 from app.api.research import router as research_router
 from app.api.retrieval import router as retrieval_router
+from app.api.settings import router as settings_router
 from app.config.settings import get_settings
 from app.core.database_health import check_database_connection
 from app.core.logging import configure_logging
@@ -30,6 +31,7 @@ app = FastAPI(
 app.include_router(retrieval_router)
 app.include_router(research_router)
 app.include_router(documents_router)
+app.include_router(settings_router)
 
 
 @app.on_event("startup")
