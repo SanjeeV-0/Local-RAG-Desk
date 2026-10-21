@@ -1,0 +1,86 @@
+This is very revealing — there are exactly 8 READY documents, and 5 of them are a tightly-related retrieval-benchmark corpus (which maps exactly to the 5 topics in the answer), while the other 3 — PROMPT_INJECTION_JAIL_BREAKING, PII_DETECTION, DevOps_Assistant_Report — are a completely different topic domain and got zero mention. Let me confirm this with a live trace rather than just theorizing.
+
+  Ran 2 shell commands
+
+Confirmed with hard evidence, not just a theory. I ran the exact query live against your actual database with full tracing.
+
+What I found
+
+- You have exactly 8 READY documents: 5 are a tightly related retrieval-benchmark corpus (Vector Search Fundamentals, HNSW Indexing, Cross-Encoder Reranking, Query Decomposition, Retrieval Evaluation Methodology), and 3 are a completely different topic domain (PROMPT_INJECTION_JAIL_BREAKING, PII_DETECTION, DevOps_Assistant_Report).
+- The query decomposed into ["summarize the available documents", "What documents are available for summarization?"], and vector search pulled a generous candidate pool — 200 raw candidates, 126 after dedup.
+- Zero of those 126 candidates came from the other 3 documents. Not "they were retrieved but reranked out" — they never entered the candidate pool at all, even with a 100-per-sub-query candidate limit.
+
+Why — and it's not a bug
+
+This is the standard, structural limitation of embedding-based retrieval applied to a task it isn't built for. Vector search finds chunks whose embeddings are most similar to the query's own embedding — it has no concept of "there are 8 distinct documents, make sure I sample from all of them." "Summarize the available documents" and "what documents are available for summarization" are both phrased in terms of retrieval/search/summarization concepts — which happen to be exactly what the 5-document benchmark corpus is about. So those 5 documents' content is semantically close to the query text itself, while prompt-injection, PII, and DevOps content isn't close to that phrasing at all — cosine similarity ranked them far outside even a 100-candidate net. This isn't a limit or config problem; raising the candidate limit further wouldn't fix it, because the issue is topical distance, not an exhausted search budget.
+
+What would actually fix "summarize everything," if you want it
+
+This needs a different kind of operation, not a bigger vector search:
+1. A dedicated "summarize the whole corpus" path that bypasses vector retrieval entirely — enumerate all READY documents (the data already exists via GET /documents) and either summarize each independently or guarantee at least one representative chunk per document before generation, rather than letting similarity-ranking decide which documents get represented at all.
+2. A narrower fix: detect "broad/whole-corpus" intent in the query and switch to a round-robin-per-document retrieval mode for that case specifically, instead of pure similarity ranking.
+
+Neither is a quick tweak — both are real feature work (new retrieval strategy + intent detection). Want me to scope and build one of these, or is knowing why this happened enough for now?
+
+✻ Brewed for 1m 56s · done 5:05 PM
+
+※ recap: You're hardening and extending the Local RAG Desk app. Just diagnosed why "summarize the available documents" only covers 5 of 8 docs: vector search can't guarantee full-corpus coverage. Next: decide if you want a dedicated whole-corpus summarization feature built.
+
+❯ You are an expert RAG Routing Agent. Your sole job is to analyze the user's input query and determine the optimal retrieval strategy based on their explicit intent.
+
+  You must classify the query into one of three intents:
+  1. SUMMARY: Used when the user wants an overview, synthesis, or summary of multiple or all available documents.
+  2. EXPLAIN: Used when the user wants a deep dive, conceptual explanation, troubleshooting step, or thorough "how-it-works" breakdown of a specific topic.
+  3. GENERAL: Used for direct, fact-based lookup questions, quick answers, or standard Q&A.
+
+  Based on the intent, attach the required retrieval parameters exactly as specified below:
+
+  - If INTENT is SUMMARY:
+    - retrieval_strategy: "metadata_loop" (Forces the system to fetch chunks from every unique document ID).
+    - top_k_per_doc: 2
+    - search_type: "filter"
+  - If INTENT is EXPLAIN:
+    - retrieval_strategy: "parent_document" (Fetches the matching chunk plus its surrounding context window).
+    - global_top_k: 15
+    - search_type: "similarity"
+  - If INTENT is GENERAL:
+    - retrieval_strategy: "standard_k" (Standard precise semantic lookup).
+    - global_top_k: 5
+    - search_type: "mmr" (Max Marginal Relevance to prevent duplicate chunks)
+
+  Output your decision strictly as a JSON object with keys: "intent", "retrieval_strategy", "top_k", and "search_type". Do not include any conversational filler.
+
+  what u think of this method will this work??
+
+This targets exactly the right problem — a classifier that routes "summarize everything" queries to a different retrieval strategy than normal lookups is the correct fix for what we just found. But as written, there are real gaps between this prompt and what would actually work in your codebase. Let me go through it carefully.
+
+The concept is right, the prompt has real bugs
+
+1. Schema mismatch — this would silently lose information.
+You define top_k_per_doc for SUMMARY and global_top_k for EXPLAIN/GENERAL — two semantically different things (per-document count vs. corpus-wide count). But the output schema only has one generic top_k key. Whatever LLM executes this has to collapse two different concepts into one field name, and downstream code consuming the JSON has no way to know which meaning top_k carries for a given response without re-deriving it from intent. Either rename the schema to carry both (top_k_per_doc and global_top_k, nullable depending on branch), or keep top_k but document explicitly what it means per-intent.
+
+2. No structured-output enforcement.
+You're trusting free-text LLM output to be valid JSON with the right enum value for intent/retrieval_strategy. Given what we already learned this session — your OPENROUTER_MODEL=openrouter/free auto-routes to different backend models per request, and one of them (a content-safety classifier) doesn't even follow basic generation instructions — this is a real reliability risk, not a theoretical one. Your codebase already has the right tool for this: response_format is already a first-class, wired-up parameter on OpenRouterGenerationProvider/decomposition calls. This router call should use a JSON-schema-constrained response_format, not prompt-level "output strictly as JSON" instructions alone.
+
+3. Should this be an LLM call at all?
+Your existing query_router.py deliberately does not use an LLM for its decompose/don't-decompose decision — it's a fast, deterministic, rule-based classifier, precisely to avoid adding latency and the flaky-model risk to every single request. A 3-way SUMMARY/EXPLAIN/GENERAL classification is arguably an even simpler problem (keyword/pattern signals like "summarize," "overview," "all documents" vs. "explain," "how does," "why" vs. everything else) that a deterministic classifier could likely handle with reasonable accuracy, same pattern as should_decompose(). I'd lean toward building this as a rule-based router first, and only reach for an LLM call if the rule-based version proves too inaccurate in practice.
+
+The bigger issue: none of these three retrieval strategies exist yet
+
+This is the part that matters most. The prompt assumes three backend retrieval modes are available to dispatch to — none of them are implemented in this codebase today:
+
+- metadata_loop (fetch N chunks per unique document ID) — this is exactly the fix for the problem we just diagnosed, but DocumentRepository has no "N chunks per document across all documents" query. search_similar_chunks is pure cosine-distance ranking. This needs a genuinely new repository method.
+- parent_document (chunk + surrounding context window) — "small-to-big" retrieval. Not implemented. Would need to fetch a matched chunk's neighboring chunk_indexs within the same document and section.
+- mmr (Max Marginal Relevance diversity reranking) — not implemented. Current reranking is cross-encoder + RRF only, neither of which does diversity selection. MMR needs access to the actual embedding vectors at ranking time to compute pairwise similarity within the candidate pool — RetrievedChunk currently only carries distance, not the vector itself, so this needs a model change too.
+
+So: dropping this prompt into the system as-is would produce a nicely classified JSON object and then... nothing would actually retrieve differently, because there's no code on the other end to execute metadata_loop/parent_document/mmr. The routing decision and the retrieval execution are two separate, both-unbuilt pieces.
+
+My honest recommendation
+
+Given the real problem you hit was specifically the SUMMARY case, I'd scope this down rather than build all three at once:
+
+1. Build metadata_loop for real (the one that directly fixes what we found) — new repository method, wired into RetrievalService as an alternate path.
+2. Build the classifier as a deterministic rule-based router first (cheap, reliable, matches existing query_router.py pattern) — reach for an LLM-based version only if rules prove insufficient.
+3. Treat parent_document and mmr as separate, later feature requests — they're real and reasonable RAG techniques, just unrelated to the bug you just hit, and each is its own chunk of work.
+
+Want me to scope and build #1 and #2 first?
